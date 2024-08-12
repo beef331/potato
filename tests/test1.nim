@@ -64,11 +64,46 @@ proc exit(app: var App) =
 # MAIN #
 ########
 
+type
+  Cycle = ref object
+    child: Cycle
+    value: int
+  ObjectVariant = object
+    case kind: bool
+    of true:
+      i: int
+    of false:
+      j: string
+
 var app {.persistent.} = App(window: nil, renderer: nil)
 
 var rect {.persistent.} = Rect(x: 0, y: 0, w: 100, h:100)
+var a {.persistent.} = block:
+  let cyc = Cycle(value: 10)
+  cyc.child = Cycle(value: 300, child: cyc)
+  cyc
+
+
+proc printTree(c: Cycle) =
+  var
+    buffer = ""
+    visited: seq[Cycle]
+    current = c
+
+  while current != nil and current notin visited:
+    buffer.add $current.value
+    buffer.add " -> "
+    visited.add current
+    current = current.child
+
+  echo buffer
+
+a.printTree()
+
+var someVar {.persistent.} = ObjectVariant(kind: false, j: "hmm")
 
 proc potatoMain() {.exportc, dynlib.} =
+
   if app.window != nil or init(app):
     # Clear screen with draw color
     discard app.renderer.setRenderDrawColor(0, 0, 0, 255)
@@ -91,6 +126,7 @@ proc potatoMain() {.exportc, dynlib.} =
       of Keydown:
         if evt.key.keysym.sym == K_F11:
           potatoCompileIt()
+
       else:
         discard
 

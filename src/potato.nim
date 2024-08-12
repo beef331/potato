@@ -1,28 +1,28 @@
-import std/[macros, genasts, atomics]
-import pkg/jsony
-export jsony
+import std/[macros, genasts, atomics, json, tables]
 
 when not defined(useMalloc):
   {.error: "Please compile with -d:useMalloc either in config or on the CLI".}
 
 when appType != "lib":
   import std/[
-    dynlib, compilesettings, tables,
+    dynlib, compilesettings,
     paths, dirs, strutils,
     osproc, locks,
     asyncfile, asyncdispatch,
   ]
   import std/inotify except INotifyEvent
   import potato/inotifyevents
+else:
+  import std/typetraits
 
 
 type
-  SaveKind = enum
+  SaveKind* = enum
     Int
     Float
     String
 
-  SaveBuffer = object
+  SaveBuffer* = object
     case kind: SaveKind
     of Int:
       i: int64
@@ -47,15 +47,19 @@ when appType == "lib":
   {.pop.}
 
 
-  proc potatoGetOr*(name: string, data: var int, orVal: int) =
+  template potatoGetOr*(name: string, data: var int, orVal: int) =
     if not potatoGetInt(name, data):
       data = orVal
 
-  proc potatoGetOr*(name: string, data: var float, orVal: float) =
+  template potatoGetOr*(name: string, data: var SomeOrdinal, orVal: int) =
+    if not potatoGetInt(name, data):
+      data = cast[typeof(data)](orVal)
+
+  template potatoGetOr*(name: string, data: var float, orVal: float) =
     if not potatoGetFloat(name, data):
       data = orVal
 
-  proc potatoGetOr*(name: string, data: var string, orVal: string) =
+  template potatoGetOr*(name: string, data: var string, orVal: string) =
     var len = 0
     if potatoGetStringSize(name, len):
       data.setLen(len)
@@ -75,22 +79,58 @@ when appType == "lib":
     parseHook(s, i, theAddr)
     v = cast[T](theAddr)
 
-  template potatoGetOr*[T: object](name: string, data: var T, orVal: T) =
+  type DeserialiseState = object
+    refs: Table[int, pointer]
+    root: JsonNode
+
+  proc deserialise*[T: SomeInteger or bool](i: var T, state: var DeserialiseState, current: JsonNode) =
+    i = T(current.getInt())
+
+  proc deserialise*[T: pointer or ptr](p: var T, state: var DeserialiseState, current: JsonNode) =
+    p = cast[T](current.getInt())
+
+  proc deserialise*[T: SomeFloat](f: var T, state: var DeserialiseState, current: JsonNode) =
+    f = T(current.getFloat())
+
+  proc deserialise*(s: var string, state: var DeserialiseState, current: JsonNode) =
+    s = current.getStr()
+
+  proc deserialise*[T: ref](r: var T, state: var DeserialiseState, current: JsonNode) =
+    mixin deserialise
+    var theRef = current.getInt()
+    if theRef in state.refs:
+      r = cast[T](state.refs[theRef])
+    else:
+      new r
+      state.refs[theRef] = cast[pointer](r)
+      r[].deserialise(state, state.root[$theRef])
+
+  proc deserialise*[T: object or tuple](obj: var T, state: var DeserialiseState, current: JsonNode) =
+    for name, field in obj.fieldPairs:
+      {.cast(uncheckedAssign).}:
+        field.deserialise(state, current[name])
+
+  template potatoGetOr*[T: object | ref | tuple](name: string, data: var T, orVal: T) =
     var theString = ""
     potatoGetOr(name, theString, "")
     if theString != "":
-      data = theString.fromJson(T)
+      let theJson = theString.parseJson()
+      var state = DeserialiseState(root: theJson)
+      data.deserialise(state, theJson["entry"])
     else:
       data = orVal
 
-
-  proc potatoGetOr*[T: SomeOrdinal or float32](name: string, data: var T, orVal: T) =
+  template potatoGetOr*[T: SomeOrdinal or float32](name: string, data: var T, orVal: T) =
     var val = 0
     data =
       if potatoGetInt(name, val):
-        T(val)
+        cast[T](val)
       else:
         orVal
+
+  template potatoGetOr*[T: distinct](name: string, data: var T, orVal: T) =
+    potatoGetOr(name, data.distinctBase(), orVal.distinctBase())
+
 
   proc potatoPut*(name: string, i: int) = potatoPutInt(name, i)
   proc potatoPut*(name: string, f: float) = potatoPutFloat(name, f)
@@ -99,13 +139,39 @@ when appType == "lib":
   proc potatoPut*(name, data: string) = potatoPutString(name, data)
 
 
-  proc dumpHook*(s: var string, v: pointer or ptr) =
-    let data = cast[int](v)
-    s.dumpHook(data)
+  proc serialise*[T: SomeInteger or pointer or ptr or bool](name: string, val: T, root, parent: JsonNode) =
+    parent.add(name, newJInt(cast[int](val)))
 
-  proc potatoPut(name: string, data: object) =
-    mixin toJson
-    potatoPutString(name, data.toJson())
+  proc serialise*[T: SomeFloat](name: string, val: T, root, parent: JsonNode) =
+    parent.add(name, newJFloat(cast[float](val)))
+  proc serialise*(name, val: string, root, parent: JsonNode) =
+    parent.add(name, newJString(val))
+
+  proc serialise*[T: ref](name: string, val: T, root, parent: JsonNode) =
+    let iVal = cast[int](val)
+    parent.add(name, newJInt(iVal))
+    if val != nil and $iVal notin root:
+      ($iVal).serialise(val[], root, root)
+
+  proc serialise*[T: object or tuple](name: string, val: T, root, parent: JsonNode) =
+    parent.add(name, newJObject())
+    for fieldName, field in val.fieldPairs:
+      fieldName.serialise(field, root, parent[name])
+
+  proc potatoPut*(name: string, data: object or tuple) =
+    let root = newJObject()
+    try:
+      serialise("entry", data, root, root)
+      potatoPutString(name, $root)
+    except Exception as e:
+      echo e.msg
+      echo $root
+
+  proc potatoPut*(name: string, data: ref) =
+    let root = newJObject()
+    serialise("entry", data, root, root)
+    potatoPutString(name, $root)
+
 
   proc potatoExit() {.exportc, dynlib.} =
     for ser in serialisers:
@@ -163,9 +229,9 @@ else:
       secondSpace = str.find(" ", firstSpace + 1)
       toInsert =
         if firstRun:
-          " -d:firstRun --app:lib "
+          " -d:firstRun --app:lib --verbosity:0 "
         else:
-          " --app:lib "
+          " --app:lib --verbosity:0 "
     result = str
     result.insert toInsert, secondSpace
     result = result.replace " -r "
@@ -247,12 +313,19 @@ else:
 
 macro persistentImpl(expr: typed, path: static string): untyped =
   when appType == "lib":
-    let defaultVal = expr[0][^1]
+    var
+      defaultVal = expr[0][^1]
+    defaultVal =
+        if defaultVal.kind == nnkEmpty:
+          newCall("default", newCall("typeof", expr[0][^2]))
+        else:
+          defaultVal
+
     result = newStmtList(expr)
     let
       name = result[0][0][0]
       thePath = newLit(path & name.repr)
-    result[0][0][^1] = newCall("default", newCall("typeof", defaultVal.getTypeInst))
+    result[0][0][^1] = newCall("default", newCall("typeof", defaultVal))
     result.add:
       genast(name, thePath, defaultVal):
         potatoGetOr(thePath, name, defaultVal)
