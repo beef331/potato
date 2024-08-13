@@ -9,6 +9,7 @@ when appType != "lib":
     paths, dirs, strutils,
     osproc, locks,
     asyncfile, asyncdispatch,
+    files, tempfiles
   ]
   import std/inotify except INotifyEvent
   import potato/inotifyevents
@@ -32,9 +33,14 @@ type
       s: string
 
 when appType == "lib":
-  var serialisers: seq[proc()]
+  type DeserialiseState = object
+    refs: Table[int, pointer]
+    root: JsonNode
 
-  {.push importc, dynlib:"".} # We want the executable's procedures
+
+  var serialisers: seq[proc() {.nimcall, raises: [Exception].}]
+
+  {.push importc, dynlib:"", raises: [Exception].} # We want the executable's procedures
   proc potatoContains*(name: string, kind: SaveKind): bool
   proc potatoGetInt*(name: string, data: var int): bool
   proc potatoGetFloat*(name: string, data: var float): bool
@@ -44,6 +50,7 @@ when appType == "lib":
   proc potatoPutFloat*(name: string, f: float)
   proc potatoPutString*(name: string, data: string)
   proc potatoCompileIt*()
+
   {.pop.}
 
 
@@ -51,9 +58,12 @@ when appType == "lib":
     if not potatoGetInt(name, data):
       data = orVal
 
-  template potatoGetOr*(name: string, data: var SomeOrdinal, orVal: int) =
-    if not potatoGetInt(name, data):
-      data = cast[typeof(data)](orVal)
+  template potatoGetOr*(name: string, data: var SomeOrdinal, orVal: SomeOrdinal) =
+    var val: int
+    if potatoGetInt(name, val):
+      copyMem(data.addr, val.addr, sizeof(data))
+    else:
+      data = orVal
 
   template potatoGetOr*(name: string, data: var float, orVal: float) =
     if not potatoGetFloat(name, data):
@@ -67,50 +77,7 @@ when appType == "lib":
     else:
       data = orVal
 
-  template potatoGetOr*[T: pointer or ptr](name: string, data: var T, orVal: T) =
-    var theAddr = 0
-    if potatoGetInt(name, theAddr):
-      copyMem(data.addr, theAddr, sizeof(pointer))
-    else:
-      data = orVal
-
-  proc parseHook*[T: pointer or ptr](s: string; i: var int; v: var T) =
-    var theAddr = 0
-    parseHook(s, i, theAddr)
-    v = cast[T](theAddr)
-
-  type DeserialiseState = object
-    refs: Table[int, pointer]
-    root: JsonNode
-
-  proc deserialise*[T: SomeInteger or bool](i: var T, state: var DeserialiseState, current: JsonNode) =
-    i = T(current.getInt())
-
-  proc deserialise*[T: pointer or ptr](p: var T, state: var DeserialiseState, current: JsonNode) =
-    p = cast[T](current.getInt())
-
-  proc deserialise*[T: SomeFloat](f: var T, state: var DeserialiseState, current: JsonNode) =
-    f = T(current.getFloat())
-
-  proc deserialise*(s: var string, state: var DeserialiseState, current: JsonNode) =
-    s = current.getStr()
-
-  proc deserialise*[T: ref](r: var T, state: var DeserialiseState, current: JsonNode) =
-    mixin deserialise
-    var theRef = current.getInt()
-    if theRef in state.refs:
-      r = cast[T](state.refs[theRef])
-    else:
-      new r
-      state.refs[theRef] = cast[pointer](r)
-      r[].deserialise(state, state.root[$theRef])
-
-  proc deserialise*[T: object or tuple](obj: var T, state: var DeserialiseState, current: JsonNode) =
-    for name, field in obj.fieldPairs:
-      {.cast(uncheckedAssign).}:
-        field.deserialise(state, current[name])
-
-  template potatoGetOr*[T: object | ref | tuple](name: string, data: var T, orVal: T) =
+  template potatoGetOr*[T: object | ref | tuple or seq or array](name: string, data: var T, orVal: T) =
     var theString = ""
     potatoGetOr(name, theString, "")
     if theString != "":
@@ -120,65 +87,147 @@ when appType == "lib":
     else:
       data = orVal
 
-  template potatoGetOr*[T: SomeOrdinal or float32](name: string, data: var T, orVal: T) =
+  template potatoGetOr*[T: SomeOrdinal | float32](name: string, data: var T, orVal: T) =
     var val = 0
-    data =
-      if potatoGetInt(name, val):
-        cast[T](val)
-      else:
-        orVal
+    if potatoGetInt(name, val):
+      copyMem(data.addr, val.addr, sizeof(T))
+    else:
+      data = orVal
 
   template potatoGetOr*[T: distinct](name: string, data: var T, orVal: T) =
     potatoGetOr(name, data.distinctBase(), orVal.distinctBase())
 
+  template potatoGetOr*[T: pointer | ptr | proc](name: string, data: var T, orVal: T) =
+    var theAddr = 0
+    if potatoGetInt(name, theAddr):
+      copyMem(data.addr, theAddr.addr, sizeof(T))
+    else:
+      data = orVal
+
+  proc deserialise*[T: SomeInteger | bool | enum](i: var T, state: var DeserialiseState, current: JsonNode) =
+    var iVal = current.getInt()
+    copyMem(i.addr, iVal.addr, sizeof(T))
+
+  proc deserialise*[T: pointer | ptr | proc](p: var T, state: var DeserialiseState, current: JsonNode) =
+    let val = current.getInt()
+    copyMem(p.addr, val.addr, sizeof(pointer))
+
+  proc deserialise*[T: SomeFloat](f: var T, state: var DeserialiseState, current: JsonNode) =
+    f = T(current.getFloat())
+
+  proc deserialise*(s: var string, state: var DeserialiseState, current: JsonNode) =
+    s = current.getStr()
+
+  proc deserialise*[T: distinct](val: var T, state: var DeserialiseState, current: JsonNode) =
+    val.distinctBase().deserialise(state, current)
+
+  proc deserialise*[T: ref](r: var T, state: var DeserialiseState, current: JsonNode) =
+    var theRef = current.getInt()
+    if theRef in state.refs:
+      r = cast[T](state.refs[theRef])
+    else:
+      if theRef != 0:
+        new r
+        state.refs[theRef] = cast[pointer](r)
+        r[].deserialise(state, state.root[$theRef])
+
+  proc deserialise*[T: object or tuple](obj: var T, state: var DeserialiseState, current: JsonNode) =
+    for name, field in obj.fieldPairs:
+      {.cast(uncheckedAssign).}:
+        field.deserialise(state, current[name])
+
+  proc deserialise*[T](s: var seq[T], state: var DeserialiseState, current: JsonNode) =
+    s.setLen current.len
+    for i, x in s.mpairs:
+      x.deserialise(state, current[i])
+
+  proc deserialise*[T](s: var set[T], state: var DeserialiseState, current: JsonNode) =
+    let str = current.getStr()
+    copyMem(s.addr, str.cstring, min(s.len, str.len))
+
+  proc deserialise*[Idx, T](s: var array[Idx, T], state: var DeserialiseState, current: JsonNode) =
+    try:
+      for i, x in s.mpairs:
+        x.deserialise(state, current[ord i])
+    except Exception as e:
+      echo e.msg
 
   proc potatoPut*(name: string, i: int) = potatoPutInt(name, i)
   proc potatoPut*(name: string, f: float) = potatoPutFloat(name, f)
   proc potatoPut*(name: string, f: float32) = potatoPutFloat(name, f.float)
-  proc potatoPut*(name: string, i: SomeOrdinal) = potatoPutInt(name, cast[int](i))
+  proc potatoPut*(name: string, i: SomeOrdinal or ptr or proc) =
+    var data = 0
+    copyMem(data.addr, i.addr, sizeof(i))
+    potatoPutInt(name, data)
   proc potatoPut*(name, data: string) = potatoPutString(name, data)
 
 
-  proc serialise*[T: SomeInteger or pointer or ptr or bool](name: string, val: T, root, parent: JsonNode) =
-    parent.add(name, newJInt(cast[int](val)))
+  proc serialise*[T: SomeInteger or pointer or ptr or bool or enum | proc](val: T, root: JsonNode): JsonNode =
+    var theAddr = 0
+    copyMem(theAddr.addr, val.addr, min(sizeof(val), sizeof(int)))
+    newJInt(theAddr)
 
-  proc serialise*[T: SomeFloat](name: string, val: T, root, parent: JsonNode) =
-    parent.add(name, newJFloat(cast[float](val)))
-  proc serialise*(name, val: string, root, parent: JsonNode) =
-    parent.add(name, newJString(val))
+  proc serialise*[T: distinct](val: T, root: JsonNode): JsonNode =
+    serialise(val.distinctbase, root)
 
-  proc serialise*[T: ref](name: string, val: T, root, parent: JsonNode) =
-    let iVal = cast[int](val)
-    parent.add(name, newJInt(iVal))
-    if val != nil and $iVal notin root:
-      ($iVal).serialise(val[], root, root)
+  proc serialise*[T: SomeFloat](val: T, root: JsonNode): JsonNode =
+    newJFloat(float(val))
 
-  proc serialise*[T: object or tuple](name: string, val: T, root, parent: JsonNode) =
-    parent.add(name, newJObject())
+  proc serialise*(val: string, root: JsonNode): JsonNode =
+    newJString(val)
+
+  proc serialise*[T: ref](val: T, root: JsonNode): JsonNode =
+    var iVal: int
+    copyMem(iVal.addr, val.addr, sizeof(pointer))
+    if val != nil:
+      let strName = $iVal
+      if not root.hasKey(strName):
+        root.add(strName, nil) # store a temp here
+        root[strName] = val[].serialise(root)
+      newJInt(iVal)
+    else:
+      newJInt(0)
+
+  proc serialise*[T: object or tuple](val: T, root: JsonNode): JsonNode =
+    result = newJObject()
     for fieldName, field in val.fieldPairs:
-      fieldName.serialise(field, root, parent[name])
+      result.add(fieldName, field.serialise(root))
+
+  proc serialise*[T](val: openarray[T], root: JsonNode): JsonNode =
+    result = newJArray()
+    for x in val.items:
+      result.add x.serialise(root)
+
+  proc serialise*[T](val: set[T], root: JsonNode): JsonNode =
+    let buffer = newString(sizeof(val))
+    copyMem(buffer.cstring, val.addr, sizeof(val))
+    result = newJString(buffer)
 
   proc potatoPut*(name: string, data: object or tuple) =
     let root = newJObject()
-    try:
-      serialise("entry", data, root, root)
-      potatoPutString(name, $root)
-    except Exception as e:
-      echo e.msg
-      echo $root
+    root.add("entry", data.serialise(root))
+    potatoPutString(name, $root)
 
   proc potatoPut*(name: string, data: ref) =
     let root = newJObject()
-    serialise("entry", data, root, root)
+    root.add("entry", data.serialise(root))
     potatoPutString(name, $root)
 
+  proc potatoPut*(name: string, data: distinct) =
+    potatoPut(name, data.distinctBase)
 
   proc potatoExit() {.exportc, dynlib.} =
     for ser in serialisers:
       ser()
-
 else:
-  var buffers: Table[string, SaveBuffer]
+  var
+    compileProcess : Process
+    procLock: Lock
+    lib: LibHandle
+    potatoMain: proc() {.nimcall.}
+    needReload: Atomic[bool]
+    buffers: Table[string, SaveBuffer]
+
   {.passc: "-rdynamic", passL: "-rdynamic".}
   {.push exportc, dynlib.}
   proc potatoContains*(name: string, kind: SaveKind): bool =
@@ -227,21 +276,11 @@ else:
     let
       firstSpace = str.find(" ")
       secondSpace = str.find(" ", firstSpace + 1)
-      toInsert =
-        if firstRun:
-          " -d:firstRun --app:lib --verbosity:0 "
-        else:
-          " --app:lib --verbosity:0 "
+      toInsert = " --app:lib --verbosity:0 "
     result = str
+    result = result.replace(" -r ", " ")
     result.insert toInsert, secondSpace
-    result = result.replace " -r "
 
-  var
-    compileProcess : Process
-    procLock: Lock
-    lib: LibHandle
-    potatoMain: proc() {.nimcall.}
-    needReload: Atomic[bool]
 
   initLock(procLock)
 
@@ -249,7 +288,12 @@ else:
     {.cast(gcSafe).}:
       withLock procLock:
         if compileProcess != nil:
+          try:
+            compileProcess.terminate()
+          except OsError as e:
+            echo e.msg
           compileProcess.close()
+
         compileProcess = startProcess("nim" & command, options = {poStdErrToStdOut, poEchoCmd, poEvalCommand, poParentStreams})
 
   const
@@ -261,12 +305,25 @@ else:
   proc potatoCompileIt*() {.exportc, dynlib.} =
     compileIt command.insertFlags(false)
 
+  var oldLibs: seq[LibHandle]
+
   proc reloadLib() =
-    if lib != nil:
-      cast[proc(){.nimcall.}](lib.symAddr("potatoExit"))()
-      lib.unloadLib()
-    lib = loadLib(string dynLibPath)
-    potatoMain = cast[typeof(potatoMain)](lib.symAddr"potatoMain")
+    if needReload.load():
+      echo "Reload"
+      if lib != nil:
+        cast[proc(){.nimcall, raises: [Exception].}](lib.symAddr("potatoExit"))()
+        oldLibs.add lib # Keep the address alive so pointer procs persist
+        echo "saved"
+
+      try:
+        let tmp = genTempPath("potato","")
+        moveFile(dynLibPath, Path tmp)
+        lib = loadLib(tmp, false)
+        echo "loaded"
+        potatoMain = cast[typeof(potatoMain)](lib.symAddr"potatoMain")
+      except:
+        discard
+      needReload.store false
 
   proc watcherProc() =
     var
@@ -282,18 +339,17 @@ else:
 
     needReload.store(true)
 
-    assert iNotifyFd.inotify_add_watch(cstring querySetting(outDir), {CloseWrite}) >= 0
+    assert iNotifyFd.inotify_add_watch(cstring querySetting(outDir), IN_MODIFY) >= 0
 
     while true:
       try:
-        let len = waitfor watcherfile.readBuffer(buffer.cstring, pathMax + 1)
+        let len = waitfor watcherfile.readBuffer(buffer.cstring, buffer.len)
         var pos = 0
         while pos < len:
           var event = cast[ptr InotifyEvent](buffer[pos].addr)
           if event.getName() == DynLibFormat % querySetting(outFile):
             needReload.store(true)
-            echo "Reload"
-
+            pos = len
           pos += sizeof(InotifyEvent) + int event.len
 
       except Exception as e:
@@ -306,9 +362,7 @@ else:
   while true:
     if potatoMain != nil:
       potatoMain()
-    if needReload.load:
-      reloadLib()
-      needReload.store(false)
+    reloadLib()
 
 
 macro persistentImpl(expr: typed, path: static string): untyped =
@@ -329,9 +383,8 @@ macro persistentImpl(expr: typed, path: static string): untyped =
     result.add:
       genast(name, thePath, defaultVal):
         potatoGetOr(thePath, name, defaultVal)
-        serialisers.add proc() =
+        serialisers.add proc() {.raises: [Exception], nimcall.} =
           potatoPut(thePath, name)
-          reset(name)
   else:
     result = expr
 

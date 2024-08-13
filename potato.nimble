@@ -11,3 +11,4 @@ srcDir        = "src"
 
 requires "nim >= 2.0.8"
 requires "jsony >= 1.1.5"
+requires "sdl2_nim >= 2.0.14.1"
