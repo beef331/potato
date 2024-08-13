@@ -16,22 +16,6 @@ when appType != "lib":
 else:
   import std/typetraits
 
-
-type
-  SaveKind* = enum
-    Int
-    Float
-    String
-
-  SaveBuffer* = object
-    case kind: SaveKind
-    of Int:
-      i: int64
-    of Float:
-      f: float
-    of String:
-      s: string
-
 when appType == "lib":
   type DeserialiseState = object
     refs: Table[int, pointer]
@@ -41,66 +25,21 @@ when appType == "lib":
   var serialisers: seq[proc() {.nimcall, raises: [Exception].}]
 
   {.push importc, dynlib:"", raises: [Exception].} # We want the executable's procedures
-  proc potatoContains*(name: string, kind: SaveKind): bool
-  proc potatoGetInt*(name: string, data: var int): bool
-  proc potatoGetFloat*(name: string, data: var float): bool
-  proc potatoGetStringSize*(name: string, len: var int): bool
-  proc potatoGetString*(name: string, data: cstring): bool
-  proc potatoPutInt*(name: string, i: int)
-  proc potatoPutFloat*(name: string, f: float)
-  proc potatoPutString*(name: string, data: string)
+  proc potatoGet*(name: string): JsonNode
+  proc potatoPutNode*(name: string, val: JsonNode)
   proc potatoCompileIt*()
-
   {.pop.}
 
-
-  template potatoGetOr*(name: string, data: var int, orVal: int) =
-    if not potatoGetInt(name, data):
-      data = orVal
-
-  template potatoGetOr*(name: string, data: var SomeOrdinal, orVal: SomeOrdinal) =
-    var val: int
-    if potatoGetInt(name, val):
-      copyMem(data.addr, val.addr, sizeof(data))
-    else:
-      data = orVal
-
-  template potatoGetOr*(name: string, data: var float, orVal: float) =
-    if not potatoGetFloat(name, data):
-      data = orVal
-
-  template potatoGetOr*(name: string, data: var string, orVal: string) =
-    var len = 0
-    if potatoGetStringSize(name, len):
-      data.setLen(len)
-      discard potatoGetString(name, data.cstring)
-    else:
-      data = orVal
-
-  template potatoGetOr*[T: object | ref | tuple or seq or array](name: string, data: var T, orVal: T) =
-    var theString = ""
-    potatoGetOr(name, theString, "")
-    if theString != "":
-      let theJson = theString.parseJson()
-      var state = DeserialiseState(root: theJson)
-      data.deserialise(state, theJson["entry"])
-    else:
-      data = orVal
-
-  template potatoGetOr*[T: SomeOrdinal | float32](name: string, data: var T, orVal: T) =
-    var val = 0
-    if potatoGetInt(name, val):
-      copyMem(data.addr, val.addr, sizeof(T))
-    else:
-      data = orVal
-
-  template potatoGetOr*[T: distinct](name: string, data: var T, orVal: T) =
-    potatoGetOr(name, data.distinctBase(), orVal.distinctBase())
-
-  template potatoGetOr*[T: pointer | ptr | proc](name: string, data: var T, orVal: T) =
-    var theAddr = 0
-    if potatoGetInt(name, theAddr):
-      copyMem(data.addr, theAddr.addr, sizeof(T))
+  template potatoGetOr*[T](name: string, data: var T, orVal: T) =
+    mixin deserialise
+    let node = potatoGet(name)
+    if node != nil:
+      var state = DeserialiseState(root: node)
+      try:
+        data.deserialise(state, node["entry"])
+      except CatchableError as e:
+        echo "Failed to deserialise: ", name, " ", e.msg
+        data = orVal
     else:
       data = orVal
 
@@ -152,15 +91,10 @@ when appType == "lib":
     except Exception as e:
       echo e.msg
 
-  proc potatoPut*(name: string, i: int) = potatoPutInt(name, i)
-  proc potatoPut*(name: string, f: float) = potatoPutFloat(name, f)
-  proc potatoPut*(name: string, f: float32) = potatoPutFloat(name, f.float)
-  proc potatoPut*(name: string, i: SomeOrdinal or ptr or proc) =
-    var data = 0
-    copyMem(data.addr, i.addr, sizeof(i))
-    potatoPutInt(name, data)
-  proc potatoPut*(name, data: string) = potatoPutString(name, data)
-
+  proc potatoPut*[T](name: string, val: T) =
+    let root = newJObject()
+    root.add("entry", val.serialise(root))
+    potatoPutNode(name, root)
 
   proc serialise*[T: SomeInteger or pointer or ptr or bool or enum | proc](val: T, root: JsonNode): JsonNode =
     var theAddr = 0
@@ -203,19 +137,6 @@ when appType == "lib":
     copyMem(buffer.cstring, val.addr, sizeof(val))
     result = newJString(buffer)
 
-  proc potatoPut*(name: string, data: object or tuple) =
-    let root = newJObject()
-    root.add("entry", data.serialise(root))
-    potatoPutString(name, $root)
-
-  proc potatoPut*(name: string, data: ref) =
-    let root = newJObject()
-    root.add("entry", data.serialise(root))
-    potatoPutString(name, $root)
-
-  proc potatoPut*(name: string, data: distinct) =
-    potatoPut(name, data.distinctBase)
-
   proc potatoExit() {.exportc, dynlib.} =
     for ser in serialisers:
       ser()
@@ -226,49 +147,18 @@ else:
     lib: LibHandle
     potatoMain: proc() {.nimcall.}
     needReload: Atomic[bool]
-    buffers: Table[string, SaveBuffer]
+    buffers: Table[string, JsonNode]
 
   {.passc: "-rdynamic", passL: "-rdynamic".}
   {.push exportc, dynlib.}
-  proc potatoContains*(name: string, kind: SaveKind): bool =
-    name in buffers and buffers[name].kind == kind
-
-  proc potatoGetInt*(name: string, data: var int): bool =
-    if name in buffers and buffers[name].kind == Int:
-      data = buffers[name].i
-      true
+  proc potatoGet*(name: string): JsonNode =
+    if name in buffers:
+      buffers[name]
     else:
-      false
+      nil
 
-  proc potatoGetFloat*(name: string, data: var ): bool =
-    if name in buffers and buffers[name].kind == Float:
-      data = buffers[name].f
-      true
-    else:
-      false
-
-  proc potatoGetStringSize*(name: string, len: var int): bool =
-    if name in buffers and buffers[name].kind == String:
-      len = buffers[name].s.len
-      true
-    else:
-      false
-
-  proc potatoGetString*(name: string, data: cstring): bool =
-    if name in buffers and buffers[name].kind == String:
-      copyMem(data, buffers[name].s.cstring, buffers[name].s.len)
-      true
-    else:
-      false
-
-  proc potatoPutInt(name: string, i: int) =
-    buffers[name] = SaveBuffer(kind: Int, i: i)
-
-  proc potatoPutFloat(name: string, f: float) =
-    buffers[name] = SaveBuffer(kind: Float, f: f)
-
-  proc potatoPutString(name: string, data: string) =
-    buffers[name] = SaveBuffer(kind: String, s: data)
+  proc potatoPutNode*(name: string, val: JsonNode) =
+    buffers[name] = val
 
   {.pop.}
 
