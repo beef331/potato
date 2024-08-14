@@ -83,7 +83,7 @@ when appType == "lib":
 
   proc deserialise*[T](s: var set[T], state: var DeserialiseState, current: JsonNode) =
     let str = current.getStr()
-    copyMem(s.addr, str.cstring, min(s.len, str.len))
+    copyMem(s.addr, str.cstring, min(sizeof s, str.len))
 
   proc deserialise*[Idx, T](s: var array[Idx, T], state: var DeserialiseState, current: JsonNode) =
     try:
@@ -136,7 +136,7 @@ when appType == "lib":
   proc serialise*[T](val: set[T], root: JsonNode): JsonNode =
     let buffer = newString(sizeof(val))
     copyMem(buffer.cstring, val.addr, sizeof(val))
-    result = newJString(buffer)
+    newJString(buffer)
 
   proc potatoExit() {.exportc, dynlib.} =
     for ser in serialisers:
@@ -203,7 +203,10 @@ else:
     var lines: seq[string]
     while depProcess.running():
       await sleepAsync(10)
-      lines.add depProcess.outputStream.readline()
+      try:
+        lines.add depProcess.outputStream.readline()
+      except CatchableError as e:
+        echo "Cannot read from depProcess: ", e.msg
 
     for line in lines:
       var hintStr: string
