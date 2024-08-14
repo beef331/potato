@@ -8,8 +8,9 @@ when appType != "lib":
     dynlib, compilesettings,
     paths, dirs, strutils,
     osproc, locks,
-    asyncfile, asyncdispatch,
-    files, tempfiles
+    asyncfile, asyncdispatch, asyncnet,
+    files, tempfiles, envvars,
+    strutils, sets, strscans, streams
   ]
   import std/inotify except INotifyEvent
   import potato/inotifyevents
@@ -162,7 +163,7 @@ else:
 
   {.pop.}
 
-  proc insertFlags(str: string, firstRun: bool): string =
+  proc insertFlags(str: string): string =
     let
       firstSpace = str.find(" ")
       secondSpace = str.find(" ", firstSpace + 1)
@@ -170,6 +171,16 @@ else:
     result = str
     result = result.replace(" -r ", " ")
     result.insert toInsert, secondSpace
+
+  proc insertCheckFlags(str: string): string =
+    const toInsert = " check --app:lib --verbosity:0 --processing:filenames --warnings:off --hint:all=off --hint:Processing:on "
+    result = str.multireplace(
+      {
+        " --hints:off": " ",
+        " c ": toInsert,
+        " -r ": " "
+      }
+    )
 
 
   initLock(procLock)
@@ -186,6 +197,20 @@ else:
 
         compileProcess = startProcess("nim" & command, options = {poStdErrToStdOut, poEchoCmd, poEvalCommand, poParentStreams})
 
+  proc getDepends(command: string): Future[HashSet[string]] {.async.} =
+    let depProcess = startProcess("nim" & command, options = {poEvalCommand, poEchoCmd, poStdErrToStdOut})
+    defer: depProcess.close()
+    var lines: seq[string]
+    while depProcess.running():
+      await sleepAsync(10)
+      lines.add depProcess.outputStream.readline()
+
+    for line in lines:
+      var hintStr: string
+      if line.scanf("Hint: $+ [Processing]", hintStr):
+        let start = hintStr.rfind(':') + 2
+        result.incl hintStr[start..^1]
+
   const
     command = querySetting(commandLine)
     dynLibPath = querySetting(outDir).Path / Path(DynLibFormat % querySetting(outFile))
@@ -193,7 +218,7 @@ else:
 
 
   proc potatoCompileIt*() {.exportc, dynlib.} =
-    compileIt command.insertFlags(false)
+    compileIt command.insertFlags()
 
   var oldLibs: seq[LibHandle]
 
@@ -215,13 +240,13 @@ else:
         discard
       needReload.store false
 
-  proc watcherProc() =
+  proc reloadWatcher() =
     var
       buffer = newString(sizeof(InotifyEvent) + pathMax + 1)
       iNotifyFd = inotify_init()
       watcherFile = newAsyncFile(AsyncFd iNotifyFd)
 
-    compileIt(command.insertFlags(true))
+    compileIt(command.insertFlags())
 
     {.cast(gcSafe).}:
       withLock procLock:
@@ -229,7 +254,7 @@ else:
 
     needReload.store(true)
 
-    assert iNotifyFd.inotify_add_watch(cstring querySetting(outDir), IN_MODIFY) >= 0
+    assert iNotifyFd.inotify_add_watch(cstring querySetting(outDir), InCloseWrite) >= 0
 
     while true:
       try:
@@ -246,14 +271,99 @@ else:
         echo "Failed to read from buffer " & e.msg
         break
 
+
+  proc compileWatcher() =
+    var
+      buffer = newString(sizeof(InotifyEvent) + pathMax + 1)
+      iNotifyFd = inotify_init()
+      watcherFile = newAsyncFile(AsyncFd iNotifyFd)
+
+    let depends = waitFor getDepends(command.insertCheckFlags()) #TODO: Replace with `gendepends`
+    for dir in depends:
+      assert iNotifyFd.inotify_add_watch(cstring dir, InCloseWrite) >= 0
+
+    while true:
+      try:
+        let len = waitfor watcherfile.readBuffer(buffer.cstring, buffer.len)
+        potatoCompileIt()
+      except Exception as e:
+        echo "Failed to read from buffer " & e.msg
+        break
+
+  type Command* = enum
+    Compile
+    Quit
+
+
   echo "Welcome to potato, be careful it is warm"
-  var watcherThread: Thread[void]
-  watcherThread.createThread(watcherProc)
+  var reloadThread: Thread[void]
+  reloadThread.createThread(reloadWatcher)
+
+  var compileThread: Thread[void]
+  compileThread.createThread(compileWatcher)
+
+  let
+    port = Port(
+      try:
+        parseInt(getEnv("PORTATO")) # This is a silly name, I'm a registered silly billy
+      except:
+        0
+    )
+    isListening = port.int > 0
+
+  var
+    commandFut: Future[void]
+    commandQueue: seq[Command]
+
+
+  const commandSize = static:
+    var theSize = len $Command.low
+    for x in Command:
+      theSize = max(len $Command.high, theSize)
+    theSize
+
+  proc readCommand(sock: AsyncSocket) {.async.} =
+    let data = await sock.recv(commandSize)
+    try:
+      commandQueue.add parseEnum[Command](data)
+    except:
+      echo "Cannot parse the Command: ", data
+
+  var commandSocket: AsyncSocket
+
+  proc tcpLoop() {.async.} =
+    echo "hello"
+    var clients: seq[AsyncSocket]
+    while true:
+      clients.add await commandSocket.accept()
+      asyncCheck readCommand(clients[^1])
+      for i in countDown(clients.high, 0):
+        if clients[i].isClosed():
+          clients.del(i)
+
+  if isListening:
+    commandSocket = newAsyncSocket()
+    commandSocket.setSockOpt(OptReuseAddr, true)
+    commandSocket.bindAddr(port)
+    commandSocket.listen()
+
   while true:
     if potatoMain != nil:
       potatoMain()
     reloadLib()
+    if isListening:
+      try:
+        poll(0)
+      except CatchableError as e:
+        asyncCheck tcpLoop()
+    const handlers = [
+      Compile: proc() = potatoCompileIt(),
+      Quit: proc() = quit(0)
+    ]
+    for command in commandQueue:
+      handlers[command]()
 
+    commandQueue.setLen(0)
 
 macro persistentImpl(expr: typed, path: static string): untyped =
   when appType == "lib":
