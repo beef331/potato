@@ -138,8 +138,6 @@ proc potatoMain() {.exportc, dynlib.}=
       else:
         discard
 
-
-
     # Update renderer
     app.renderer.renderPresent()
 

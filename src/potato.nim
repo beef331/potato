@@ -151,7 +151,7 @@ Reorganizing these objects is UB and will cause problems.
   proc potatoExit() {.exportc, dynlib.} =
     for ser in serialisers:
       ser()
-else:
+elif defined(hotPotato):
   var
     compileProcess : Process
     procLock: Lock
@@ -377,30 +377,38 @@ else:
       handlers[command]()
 
     commandQueue.setLen(0)
+when defined(hotPotato):
+  macro persistentImpl(expr: typed, path: static string): untyped =
+    when appType == "lib":
+      var
+        defaultVal = expr[0][^1]
+      defaultVal =
+          if defaultVal.kind == nnkEmpty:
+            newCall("default", newCall("typeof", expr[0][^2]))
+          else:
+            defaultVal
 
-macro persistentImpl(expr: typed, path: static string): untyped =
-  when appType == "lib":
-    var
-      defaultVal = expr[0][^1]
-    defaultVal =
-        if defaultVal.kind == nnkEmpty:
-          newCall("default", newCall("typeof", expr[0][^2]))
-        else:
-          defaultVal
+      result = newStmtList(expr)
+      let
+        name = result[0][0][0]
+        thePath = newLit(path & name.repr)
+      result[0][0][^1] = newCall("default", newCall("typeof", defaultVal))
+      result.add:
+        genast(name, thePath, defaultVal):
+          potatoGetOr(thePath, name, defaultVal)
+          serialisers.add proc() {.raises: [Exception], nimcall.} =
+            potatoPut(thePath, name)
+    else:
+      result = expr
 
-    result = newStmtList(expr)
-    let
-      name = result[0][0][0]
-      thePath = newLit(path & name.repr)
-    result[0][0][^1] = newCall("default", newCall("typeof", defaultVal))
-    result.add:
-      genast(name, thePath, defaultVal):
-        potatoGetOr(thePath, name, defaultVal)
-        serialisers.add proc() {.raises: [Exception], nimcall.} =
-          potatoPut(thePath, name)
-  else:
-    result = expr
+  template persistent*(expr: typed): untyped =
+    ## Annotates a variable as persistent
+    persistentImpl(expr, instantiationInfo(fullpaths = true).fileName)
+else:
+  proc potatoGet*(name: string): JsonNode = discard
+  proc potatoPutNode*(name: string, val: JsonNode) = discard
+  proc potatoCompileIt*() = discard
 
-template persistent*(expr: typed): untyped =
-  ## Annotates a variable as persistent
-  persistentImpl(expr, instantiationInfo(fullpaths = true).fileName)
+
+  template persistent*(expr: typed): untyped = expr
+
