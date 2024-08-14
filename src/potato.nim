@@ -173,12 +173,12 @@ else:
     result.insert toInsert, secondSpace
 
   proc insertCheckFlags(str: string): string =
-    const toInsert = " check --app:lib --verbosity:0 --processing:filenames --warnings:off --hint:all=off --hint:Processing:on "
+    const toInsert = " check --verbosity:0 --processing:filenames --warnings:off --hint:all=off --hint:Processing:on "
     result = str.multireplace(
       {
         " --hints:off": " ",
         " c ": toInsert,
-        " -r ": " "
+        "-r ": " ",
       }
     )
 
