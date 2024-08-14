@@ -62,14 +62,17 @@ when appType == "lib":
     val.distinctBase().deserialise(state, current)
 
   proc deserialise*[T: ref](r: var T, state: var DeserialiseState, current: JsonNode) =
-    var theRef = current.getInt()
-    if theRef in state.refs:
-      r = cast[T](state.refs[theRef])
+    when compiles(r of RootObj): # We lost type information, no way to get back
+      r = cast[T](current.getInt())
     else:
-      if theRef != 0:
-        new r
-        state.refs[theRef] = cast[pointer](r)
-        r[].deserialise(state, state.root[$theRef])
+      var theRef = current.getInt()
+      if theRef in state.refs:
+        r = cast[T](state.refs[theRef])
+      else:
+        if theRef != 0:
+          new r
+          state.refs[theRef] = cast[pointer](r)
+          r[].deserialise(state, state.root[$theRef])
 
   proc deserialise*[T: object or tuple](obj: var T, state: var DeserialiseState, current: JsonNode) =
     for name, field in obj.fieldPairs:
@@ -111,17 +114,24 @@ when appType == "lib":
   proc serialise*(val: string, root: JsonNode): JsonNode =
     newJString(val)
 
+  {.warning: """
+Presently HCR does not serialise inheritance objects using the field method, it just keeps a pointer.
+Reorganizing these objects is UB and will cause problems.
+""".}
   proc serialise*[T: ref](val: T, root: JsonNode): JsonNode =
-    var iVal: int
-    copyMem(iVal.addr, val.addr, sizeof(pointer))
-    if val != nil:
-      let strName = $iVal
-      if not root.hasKey(strName):
-        root.add(strName, nil) # store a temp here
-        root[strName] = val[].serialise(root)
-      newJInt(iVal)
+    when compiles(val of RootObj):
+      newJInt(cast[int](val))
     else:
-      newJInt(0)
+      var iVal: int
+      copyMem(iVal.addr, val.addr, sizeof(pointer))
+      if val != nil:
+        let strName = $iVal
+        if not root.hasKey(strName):
+          root.add(strName, nil) # store a temp here
+          root[strName] = val[].serialise(root)
+        newJInt(iVal)
+      else:
+        newJInt(0)
 
   proc serialise*[T: object or tuple](val: T, root: JsonNode): JsonNode =
     result = newJObject()
