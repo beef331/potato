@@ -1,4 +1,4 @@
-import std/[macros, genasts, atomics, json, tables]
+import std/[macros, genasts, json, tables]
 
 when not defined(useMalloc):
   {.error: "Please compile with -d:useMalloc either in config or on the CLI".}
@@ -10,7 +10,7 @@ when appType != "lib":
     osproc, locks,
     asyncfile, asyncdispatch, asyncnet,
     files, tempfiles, envvars,
-    strutils, sets, strscans, streams
+    strutils, sets, strscans, streams, atomics
   ]
   import std/inotify except INotifyEvent
   import potato/inotifyevents
@@ -158,6 +158,7 @@ elif defined(hotPotato):
     lib: LibHandle
     potatoMain: proc() {.nimcall.}
     needReload: Atomic[bool]
+    reloadCount: Atomic[int]
     buffers: Table[string, JsonNode]
 
   {.passc: "-rdynamic", passL: "-rdynamic".}
@@ -207,18 +208,14 @@ elif defined(hotPotato):
 
         compileProcess = startProcess("nim" & command, options = {poStdErrToStdOut, poEchoCmd, poEvalCommand, poParentStreams})
 
-  proc getDepends(command: string): Future[HashSet[string]] {.async.} =
+  proc getDepends(command: string): HashSet[string] =
     let depProcess = startProcess("nim" & command, options = {poEvalCommand, poEchoCmd, poStdErrToStdOut})
-    defer: depProcess.close()
-    var lines: seq[string]
-    while depProcess.running():
-      await sleepAsync(10)
+    defer:
       try:
-        lines.add depProcess.outputStream.readline()
+        depProcess.close()
       except CatchableError as e:
-        echo "Cannot read from depProcess: ", e.msg
-
-    for line in lines:
+        echo e.msg
+    for line in depProcess.lines:
       var hintStr: string
       if line.scanf("Hint: $+ [Processing]", hintStr):
         let start = hintStr.rfind(':') + 2
@@ -249,6 +246,7 @@ elif defined(hotPotato):
         lib = loadLib(tmp, false)
         echo "loaded"
         potatoMain = cast[typeof(potatoMain)](lib.symAddr"potatoMain")
+        reloadCount.atomicInc()
       except:
         discard
       needReload.store false
@@ -290,18 +288,30 @@ elif defined(hotPotato):
       buffer = newString(sizeof(InotifyEvent) + pathMax + 1)
       iNotifyFd = inotify_init()
       watcherFile = newAsyncFile(AsyncFd iNotifyFd)
-
-    let depends = waitFor getDepends(command.insertCheckFlags()) #TODO: Replace with `gendepends`
-    for dir in depends:
-      assert iNotifyFd.inotify_add_watch(cstring dir, InCloseWrite) >= 0
-
+      lastCount = 0
+      watchFut: Future[string]
+      fds: Table[string, cint]
+      currentDepends: HashSet[string]
     while true:
+      let theCount = reloadCount.load()
+      if theCount != lastCount or lastCount == 0:
+        let newDeps = getDepends(command.insertCheckFlags()) #TODO: Replace with `gendepends`
+
+        for dir in currentDepends - newDeps: # Remove old ones:
+          discard iNotifyFd.inotify_rm_watch(fds[dir])
+          fds.del(dir)
+
+        for dir in newDeps - currentDepends: # add new ones
+          fds[dir] = iNotifyFd.inotify_add_watch(cstring dir, InCloseWrite)
+        currentDepends = newDeps
+        lastCount = theCount
+
+      let watchFut = watcherfile.readBuffer(buffer.cstring, buffer.len)
+      watchFut.addCallback proc() = potatoCompileIt()
       try:
-        let len = waitfor watcherfile.readBuffer(buffer.cstring, buffer.len)
-        potatoCompileIt()
-      except Exception as e:
-        echo "Failed to read from buffer " & e.msg
-        break
+        poll(500)
+      except CatchableError as e:
+        echo e.msg
 
   type Command* = enum
     Compile
@@ -345,7 +355,6 @@ elif defined(hotPotato):
   var commandSocket: AsyncSocket
 
   proc tcpLoop() {.async.} =
-    echo "hello"
     var clients: seq[AsyncSocket]
     while true:
       clients.add await commandSocket.accept()
@@ -377,6 +386,7 @@ elif defined(hotPotato):
       handlers[command]()
 
     commandQueue.setLen(0)
+
 when defined(hotPotato):
   macro persistentImpl(expr: typed, path: static string): untyped =
     when appType == "lib":
