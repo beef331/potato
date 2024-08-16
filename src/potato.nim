@@ -237,9 +237,11 @@ elif defined(hotPotato):
 
   proc readCommand(sock: AsyncSocket) {.async.} =
     var data: uint8
-    assert await(sock.recvinto(data.addr, 1)) == 1
+    try:
+      assert await(sock.recvinto(data.addr, 1)) == 1
+    except CatchableError as e:
+      echo "Failed to read data: ", e.msg
     if data.ord in Command.low.ord .. Command.high.ord:
-      echo "got data: ", Command(data)
       commandQueue.add Command(data)
     else:
       echo "Command out of range: ", data.ord

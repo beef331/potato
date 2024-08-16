@@ -22,8 +22,14 @@ let
 var reloaded: Atomic[bool]
 reloaded.store true
 
-proc send(socket: Socket, cmd: Command) =
-  discard socket.send(cmd.addr, 1)
+proc tryToSend(cmd: Command) =
+  try:
+    let theSocket = net.dial("localhost", port)
+    defer: theSocket.close()
+    discard theSocket.send(cmd.addr, 1)
+  except CatchableError as e:
+    echo "Failed to send to potato'd program: ", e.msg
+
 
 proc reloadWatcher() {.gcsafe.} =
   var
@@ -42,10 +48,7 @@ proc reloadWatcher() {.gcsafe.} =
         var event = cast[ptr InotifyEvent](buffer[pos].addr)
         {.cast(gcSafe).}:
           if event.getName() == dylibPath.Path.extractFileName().string:
-            let theSocket = net.dial("localhost", port)
-            defer: theSocket.close()
-
-            theSocket.send Reload
+            tryToSend(Reload)
             reloaded.store true
             pos = len
         pos += sizeof(InotifyEvent) + int event.len
@@ -78,10 +81,8 @@ proc compileWatcher() =
     watchFut: Future[string]
     fds: Table[string, cint]
     currentDepends: HashSet[string]
-    theSocket = net.dial("localhost", port)
 
-  theSocket.send Compile
-  theSocket.close()
+  tryToSend(Compile)
 
   while true:
     if reloaded.load():
@@ -104,9 +105,7 @@ proc compileWatcher() =
     while pos < len:
       var event = cast[ptr InotifyEvent](buffer[pos].addr)
       pos += sizeof(InotifyEvent) + int event.len
-    theSocket = net.dial("localhost", port)
-    theSocket.send Compile
-    theSocket.close()
+    tryToSend(Compile)
 
 
 var threads: array[2, Thread[void]]
