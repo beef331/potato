@@ -271,7 +271,7 @@ elif defined(hotPotato):
   let watcherProc {.used.} = startProcess(
     watcher,
     args = [string dynLibPath, command.insertCheckFlags()],
-    options = {poStdErrToStdOut, poParentStreams}
+    options = {poStdErrToStdOut, poParentStreams, poUsePath}
   )
   var theTcpLoop = tcpLoop()
   while true:
