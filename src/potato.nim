@@ -1,4 +1,5 @@
 import std/[json]
+import system/ansi_c
 
 when not defined(useMalloc):
   {.error: "Please compile with -d:useMalloc either in config or on the CLI".}
@@ -8,17 +9,18 @@ when appType != "lib" and defined(hotPotato):
     dynlib, compilesettings,
     paths, strutils,
     osproc, asyncdispatch, asyncnet, os,
-    tempfiles, envvars, tables
+    tempfiles, envvars, tables, exitProcs
   ]
   import potato/commands
+
 
 elif appType == "lib":
   import std/[typetraits, macros, genasts, tables]
 
 when appType == "lib":
-  type DeserialiseState = object
-    refs: Table[int, pointer]
-    root: JsonNode
+  type DeserialiseState* = object
+    refs*: Table[int, pointer]
+    root*: JsonNode
 
 
   var serialisers: seq[proc() {.nimcall, raises: [Exception].}]
@@ -28,7 +30,54 @@ when appType == "lib":
   proc potatoPutNode*(name: string, val: JsonNode)
   proc potatoCompileIt*()
   proc potatoQuit*()
+  proc potatoError*()
   {.pop.}
+
+  globalRaiseHook = proc(e: ref Exception): bool =
+    for i, x in e.getStackTraceEntries:
+      stdout.write x.fileName, "(", x.line, ") ", x.procName
+      stdout.write "\n"
+    stdout.write"Error: "
+    stdout.writeLine e.msg
+    stdout.flushFile()
+    potatoError()
+    true
+
+  {.push stackTrace:off.}
+  proc signalHandler(sign: cint) {.noconv.} =
+    if sign == SIGINT:
+      echo("SIGINT: Interrupted by Ctrl-C.")
+      potatoQuit()
+      potatoError()
+    elif sign == SIGSEGV:
+      writeStackTrace()
+      echo("SIGSEGV: Illegal storage access. (Attempt to read from nil?)")
+      potatoError()
+    elif sign == SIGABRT:
+      writeStackTrace()
+      echo("SIGABRT: Abnormal termination.")
+      potatoError()
+    elif sign == SIGFPE:
+      writeStackTrace()
+      echo("SIGFPE: Arithmetic error.")
+      potatoError()
+    elif sign == SIGILL:
+      writeStackTrace()
+      echo("SIGILL: Illegal operation.")
+      potatoError()
+    elif (when declared(SIGBUS): sign == SIGBUS else: false):
+      echo("SIGBUS: Illegal storage access. (Attempt to read from nil?)")
+      potatoError()
+  {.pop.}
+
+  c_signal(SIGINT, signalHandler)
+  c_signal(SIGSEGV, signalHandler)
+  c_signal(SIGABRT, signalHandler)
+  c_signal(SIGFPE, signalHandler)
+  c_signal(SIGILL, signalHandler)
+  when declared(SIGBUS):
+    c_signal(SIGBUS, signalHandler)
+
 
   template potatoGetOr*[T](name: string, data: var T, orVal: T) =
     mixin deserialise
@@ -50,7 +99,6 @@ when appType == "lib":
     copyMem(i.addr, iVal.addr, sizeof(T))
 
   proc deserialise*(b: var bool, state: var DeserialiseState, current: JsonNode) =
-    echo "deserialise bool"
     b = current.getBool()
 
   proc deserialise*[T: pointer | ptr | proc](p: var T, state: var DeserialiseState, current: JsonNode) =
@@ -170,6 +218,11 @@ elif defined(hotPotato):
 
   {.passc: "-rdynamic", passL: "-rdynamic".}
   {.push exportc, dynlib.}
+  type sigjmp_buf {.bycopy, importc: "sigjmp_buf", header: "<setjmp.h>".} =  object
+
+  proc sigsetjmp(jmpb: C_JmpBuf, savemask: cint): cint {.header: "<setjmp.h>", importc: "sigsetjmp".}
+  proc siglongjmp(jmpb: C_JmpBuf, retVal: cint) {.header: "<setjmp.h>", importc: "siglongjmp".}
+
   proc potatoGet*(name: string): JsonNode =
     if name in buffers:
       buffers[name]
@@ -213,6 +266,10 @@ elif defined(hotPotato):
   const
     command = querySetting(commandLine)
     dynLibPath = querySetting(outDir).Path / Path(DynLibFormat % querySetting(outFile))
+
+  var jmp: C_JmpBuf
+  proc potatoError() {.exportc, dynlib.} =
+    siglongjmp(jmp, 1)
 
   proc potatoCompileIt*() {.exportc, dynlib.} =
     compileIt command.insertFlags()
@@ -291,9 +348,13 @@ elif defined(hotPotato):
     options = {poStdErrToStdOut, poParentStreams, poUsePath}
   )
   var theTcpLoop = tcpLoop()
+
   while running:
     if potatoMain != nil:
-      potatoMain()
+      if sigsetjmp(jmp, int32.high.cint) == 0:
+        potatoMain()
+      else:
+        reloadLib()
     try:
       poll(0)
     except CatchableError:
@@ -303,11 +364,12 @@ elif defined(hotPotato):
       handlers[command]()
     commandQueue.setLen(0)
 
-  try:
-    watcherProc.kill()
-  except:
-    discard
-  watcherProc.close()
+  addExitProc proc() =
+    try:
+      watcherProc.kill()
+    except:
+      discard
+    watcherProc.close()
 
 when defined(hotPotato):
   macro persistentImpl(expr: typed, path: static string): untyped =

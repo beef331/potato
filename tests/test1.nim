@@ -1,6 +1,7 @@
 import unittest
 import potato
 import sdl2_nim/sdl
+import std/strutils
 
 
 const
@@ -131,6 +132,9 @@ proc potatoMain() {.exportc, dynlib.}=
       of Keydown:
         if evt.key.keysym.sym == K_F11:
           potatoCompileIt()
+        if evt.key.keysym.sym == K_F12:
+          var a: ref int
+          echo a[]
       of WindowEvent:
         if evt.window.event.WindowEventID == WindowEventClose:
           quit(0)
