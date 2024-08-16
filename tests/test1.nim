@@ -114,7 +114,7 @@ proc potatoMain() {.exportc, dynlib.}=
     discard app.renderer.setRenderDrawColor(0, 0, 0, 255)
     if app.renderer.renderClear() != 0:
       echo "Warning: Can't clear screen: ", sdl.getError()
-    discard app.renderer.setRenderDrawColor(2, 255, 127, 255)
+    discard app.renderer.setRenderDrawColor(0, 255, 127, 255)
     discard app.renderer.renderFillRect(rect.addr)
     rect.x += 4
     rect.y += 2

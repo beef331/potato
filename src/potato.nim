@@ -1,21 +1,19 @@
-import std/[macros, genasts, json, tables]
+import std/[json]
 
 when not defined(useMalloc):
   {.error: "Please compile with -d:useMalloc either in config or on the CLI".}
 
-when appType != "lib":
+when appType != "lib" and defined(hotPotato):
   import std/[
     dynlib, compilesettings,
-    paths, dirs, strutils,
-    osproc, locks,
-    asyncfile, asyncdispatch, asyncnet,
-    files, tempfiles, envvars,
-    strutils, sets, strscans, streams, atomics
+    paths, strutils,
+    osproc, asyncdispatch, asyncnet, os,
+    tempfiles, envvars, tables
   ]
-  import std/inotify except INotifyEvent
-  import potato/inotifyevents
-else:
-  import std/typetraits
+  import potato/commands
+
+elif appType == "lib":
+  import std/[typetraits, macros, genasts, tables]
 
 when appType == "lib":
   type DeserialiseState = object
@@ -114,12 +112,13 @@ when appType == "lib":
   proc serialise*(val: string, root: JsonNode): JsonNode =
     newJString(val)
 
-  {.warning: """
-Presently HCR does not serialise inheritance objects using the field method, it just keeps a pointer.
-Reorganizing these objects is UB and will cause problems.
-""".}
+
   proc serialise*[T: ref](val: T, root: JsonNode): JsonNode =
     when compiles(val of RootObj):
+      {.warning: """
+Presently HCR does not serialise inheritance objects using the field method, it just keeps a pointer.
+Reorganizing these objects is UB and will cause problems. Type causing this message:
+""" & $typeof(val).}
       newJInt(cast[int](val))
     else:
       var iVal: int
@@ -154,11 +153,8 @@ Reorganizing these objects is UB and will cause problems.
 elif defined(hotPotato):
   var
     compileProcess : Process
-    procLock: Lock
     lib: LibHandle
     potatoMain: proc() {.nimcall.}
-    needReload: Atomic[bool]
-    reloadCount: Atomic[int]
     buffers: Table[string, JsonNode]
 
   {.passc: "-rdynamic", passL: "-rdynamic".}
@@ -193,39 +189,19 @@ elif defined(hotPotato):
       }
     )
 
-
-  initLock(procLock)
-
   proc compileIt(command: string) =
-    {.cast(gcSafe).}:
-      withLock procLock:
-        if compileProcess != nil:
-          try:
-            compileProcess.terminate()
-          except OsError as e:
-            echo e.msg
-          compileProcess.close()
-
-        compileProcess = startProcess("nim" & command, options = {poStdErrToStdOut, poEchoCmd, poEvalCommand, poParentStreams})
-
-  proc getDepends(command: string): HashSet[string] =
-    let depProcess = startProcess("nim" & command, options = {poEvalCommand, poEchoCmd, poStdErrToStdOut})
-    defer:
+    if compileProcess != nil:
       try:
-        depProcess.close()
-      except CatchableError as e:
+        compileProcess.terminate()
+      except OsError as e:
         echo e.msg
-    for line in depProcess.lines:
-      var hintStr: string
-      if line.scanf("Hint: $+ [Processing]", hintStr):
-        let start = hintStr.rfind(':') + 2
-        result.incl hintStr[start..^1]
+      compileProcess.close()
+
+    compileProcess = startProcess("nim" & command, options = {poStdErrToStdOut, poEchoCmd, poEvalCommand, poParentStreams})
 
   const
     command = querySetting(commandLine)
     dynLibPath = querySetting(outDir).Path / Path(DynLibFormat % querySetting(outFile))
-    pathMax = 4096
-
 
   proc potatoCompileIt*() {.exportc, dynlib.} =
     compileIt command.insertFlags()
@@ -233,97 +209,19 @@ elif defined(hotPotato):
   var oldLibs: seq[LibHandle]
 
   proc reloadLib() =
-    if needReload.load():
-      echo "Reload"
-      if lib != nil:
-        cast[proc(){.nimcall, raises: [Exception].}](lib.symAddr("potatoExit"))()
-        oldLibs.add lib # Keep the address alive so pointer procs persist
-        echo "saved"
+    if lib != nil:
+      cast[proc(){.nimcall, raises: [Exception].}](lib.symAddr("potatoExit"))()
+      oldLibs.add lib # Keep the address alive so pointer procs persist
+      echo "Saved Lib state"
 
-      try:
-        let tmp = genTempPath("potato","")
-        moveFile(dynLibPath, Path tmp)
-        lib = loadLib(tmp, false)
-        echo "loaded"
-        potatoMain = cast[typeof(potatoMain)](lib.symAddr"potatoMain")
-        reloadCount.atomicInc()
-      except:
-        discard
-      needReload.store false
-
-  proc reloadWatcher() =
-    var
-      buffer = newString(sizeof(InotifyEvent) + pathMax + 1)
-      iNotifyFd = inotify_init()
-      watcherFile = newAsyncFile(AsyncFd iNotifyFd)
-
-    compileIt(command.insertFlags())
-
-    {.cast(gcSafe).}:
-      withLock procLock:
-        discard compileProcess.waitForExit()
-
-    needReload.store(true)
-
-    assert iNotifyFd.inotify_add_watch(cstring querySetting(outDir), InCloseWrite) >= 0
-
-    while true:
-      try:
-        let len = waitfor watcherfile.readBuffer(buffer.cstring, buffer.len)
-        var pos = 0
-        while pos < len:
-          var event = cast[ptr InotifyEvent](buffer[pos].addr)
-          if event.getName() == DynLibFormat % querySetting(outFile):
-            needReload.store(true)
-            pos = len
-          pos += sizeof(InotifyEvent) + int event.len
-
-      except Exception as e:
-        echo "Failed to read from buffer " & e.msg
-        break
-
-
-  proc compileWatcher() =
-    var
-      buffer = newString(sizeof(InotifyEvent) + pathMax + 1)
-      iNotifyFd = inotify_init()
-      watcherFile = newAsyncFile(AsyncFd iNotifyFd)
-      lastCount = 0
-      watchFut: Future[string]
-      fds: Table[string, cint]
-      currentDepends: HashSet[string]
-    while true:
-      let theCount = reloadCount.load()
-      if theCount != lastCount or lastCount == 0:
-        let newDeps = getDepends(command.insertCheckFlags()) #TODO: Replace with `gendepends`
-
-        for dir in currentDepends - newDeps: # Remove old ones:
-          discard iNotifyFd.inotify_rm_watch(fds[dir])
-          fds.del(dir)
-
-        for dir in newDeps - currentDepends: # add new ones
-          fds[dir] = iNotifyFd.inotify_add_watch(cstring dir, InCloseWrite)
-        currentDepends = newDeps
-        lastCount = theCount
-
-      let watchFut = watcherfile.readBuffer(buffer.cstring, buffer.len)
-      watchFut.addCallback proc() = potatoCompileIt()
-      try:
-        poll(500)
-      except CatchableError as e:
-        echo e.msg
-
-  type Command* = enum
-    Compile
-    Quit
-
-
-  echo "Welcome to potato, be careful it is warm"
-  var reloadThread: Thread[void]
-  reloadThread.createThread(reloadWatcher)
-
-  var compileThread: Thread[void]
-  compileThread.createThread(compileWatcher)
+    try:
+      let tmp = genTempPath("potato","")
+      copyFile(string dynLibPath, tmp)
+      lib = loadLib(tmp, false)
+      echo "Loaded new Lib"
+      potatoMain = cast[typeof(potatoMain)](lib.symAddr"potatoMain")
+    except:
+      discard
 
   let
     port = Port(
@@ -332,59 +230,60 @@ elif defined(hotPotato):
       except:
         0
     )
-    isListening = port.int > 0
-
-  var
-    commandFut: Future[void]
-    commandQueue: seq[Command]
+    watcher = getEnv("POTATOWATCHER", "potatowatcher")
 
 
-  const commandSize = static:
-    var theSize = len $Command.low
-    for x in Command:
-      theSize = max(len $Command.high, theSize)
-    theSize
+  var commandQueue: seq[Command]
 
   proc readCommand(sock: AsyncSocket) {.async.} =
-    let data = await sock.recv(commandSize)
-    try:
-      commandQueue.add parseEnum[Command](data)
-    except:
-      echo "Cannot parse the Command: ", data
+    var data: uint8
+    assert await(sock.recvinto(data.addr, 1)) == 1
+    if data.ord in Command.low.ord .. Command.high.ord:
+      echo "got data: ", Command(data)
+      commandQueue.add Command(data)
+    else:
+      echo "Command out of range: ", data.ord
 
   var commandSocket: AsyncSocket
 
   proc tcpLoop() {.async.} =
     var clients: seq[AsyncSocket]
     while true:
-      clients.add await commandSocket.accept()
-      asyncCheck readCommand(clients[^1])
+      let client = await commandSocket.accept()
+      clients.add client
+      asyncCheck readCommand(client)
       for i in countDown(clients.high, 0):
-        if clients[i].isClosed():
+        if clients[i].isClosed:
           clients.del(i)
 
-  if isListening:
-    commandSocket = newAsyncSocket()
-    commandSocket.setSockOpt(OptReuseAddr, true)
-    commandSocket.bindAddr(port)
-    commandSocket.listen()
+  commandSocket = newAsyncSocket()
+  commandSocket.setSockOpt(OptReuseAddr, true)
+  commandSocket.bindAddr(port)
+  putEnv("PORTATO", $commandSocket.getLocalAddr()[1].int)
+  commandSocket.listen()
 
+  const handlers = [
+    Compile: proc() = potatoCompileIt(),
+    Reload: proc() = reloadLib(),
+    Quit: proc() = quit(0)
+  ]
+
+  let watcherProc {.used.} = startProcess(
+    watcher,
+    args = [string dynLibPath, command.insertCheckFlags()],
+    options = {poStdErrToStdOut, poParentStreams}
+  )
+  var theTcpLoop = tcpLoop()
   while true:
     if potatoMain != nil:
       potatoMain()
-    reloadLib()
-    if isListening:
-      try:
-        poll(0)
-      except CatchableError as e:
-        asyncCheck tcpLoop()
-    const handlers = [
-      Compile: proc() = potatoCompileIt(),
-      Quit: proc() = quit(0)
-    ]
+    try:
+      poll(0)
+    except CatchableError:
+      theTcpLoop = tcpLoop()
+
     for command in commandQueue:
       handlers[command]()
-
     commandQueue.setLen(0)
 
 when defined(hotPotato):
