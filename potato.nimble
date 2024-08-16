@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.1.0"
+version       = "0.1.1"
 author        = "Jason Beetham"
 description   = "Hot code reloading done as a macro"
 license       = "MIT"
