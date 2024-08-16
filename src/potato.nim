@@ -27,6 +27,7 @@ when appType == "lib":
   proc potatoGet*(name: string): JsonNode
   proc potatoPutNode*(name: string, val: JsonNode)
   proc potatoCompileIt*()
+  proc potatoQuit*()
   {.pop.}
 
   template potatoGetOr*[T](name: string, data: var T, orVal: T) =
@@ -40,11 +41,17 @@ when appType == "lib":
         echo "Failed to deserialise: ", name, " ", e.msg
         data = orVal
     else:
+      echo name, " is not in the buffer cache."
       data = orVal
+      potatoPut(name, data) # Always write the data to the cache
 
-  proc deserialise*[T: SomeInteger | bool | enum](i: var T, state: var DeserialiseState, current: JsonNode) =
+  proc deserialise*[T: SomeInteger | enum](i: var T, state: var DeserialiseState, current: JsonNode) =
     var iVal = current.getInt()
     copyMem(i.addr, iVal.addr, sizeof(T))
+
+  proc deserialise*(b: var bool, state: var DeserialiseState, current: JsonNode) =
+    echo "deserialise bool"
+    b = current.getBool()
 
   proc deserialise*[T: pointer | ptr | proc](p: var T, state: var DeserialiseState, current: JsonNode) =
     let val = current.getInt()
@@ -98,10 +105,13 @@ when appType == "lib":
     root.add("entry", val.serialise(root))
     potatoPutNode(name, root)
 
-  proc serialise*[T: SomeInteger or pointer or ptr or bool or enum | proc](val: T, root: JsonNode): JsonNode =
+  proc serialise*[T: SomeInteger or pointer or ptr or enum | proc](val: T, root: JsonNode): JsonNode =
     var theAddr = 0
     copyMem(theAddr.addr, val.addr, min(sizeof(val), sizeof(int)))
     newJInt(theAddr)
+
+  proc serialise*(val: bool, root: JsonNode): JsonNode =
+    newJBool(val)
 
   proc serialise*[T: distinct](val: T, root: JsonNode): JsonNode =
     serialise(val.distinctbase, root)
@@ -156,6 +166,7 @@ elif defined(hotPotato):
     lib: LibHandle
     potatoMain: proc() {.nimcall.}
     buffers: Table[string, JsonNode]
+    running = true
 
   {.passc: "-rdynamic", passL: "-rdynamic".}
   {.push exportc, dynlib.}
@@ -206,6 +217,9 @@ elif defined(hotPotato):
   proc potatoCompileIt*() {.exportc, dynlib.} =
     compileIt command.insertFlags()
 
+  proc potatoQuit*() {.exportc, dynlib.} =
+    running = false
+
   var oldLibs: seq[LibHandle]
 
   proc reloadLib() =
@@ -238,7 +252,7 @@ elif defined(hotPotato):
   proc readCommand(sock: AsyncSocket) {.async.} =
     var data: uint8
     try:
-      assert await(sock.recvinto(data.addr, 1)) == 1
+      discard await(sock.recvinto(data.addr, 1))
     except CatchableError as e:
       echo "Failed to read data: ", e.msg
     if data.ord in Command.low.ord .. Command.high.ord:
@@ -264,10 +278,11 @@ elif defined(hotPotato):
   putEnv("PORTATO", $commandSocket.getLocalAddr()[1].int)
   commandSocket.listen()
 
+
   const handlers = [
     Compile: proc() = potatoCompileIt(),
     Reload: proc() = reloadLib(),
-    Quit: proc() = quit(0)
+    Quit: proc() = running = false
   ]
 
   let watcherProc {.used.} = startProcess(
@@ -276,7 +291,7 @@ elif defined(hotPotato):
     options = {poStdErrToStdOut, poParentStreams, poUsePath}
   )
   var theTcpLoop = tcpLoop()
-  while true:
+  while running:
     if potatoMain != nil:
       potatoMain()
     try:
@@ -287,6 +302,12 @@ elif defined(hotPotato):
     for command in commandQueue:
       handlers[command]()
     commandQueue.setLen(0)
+
+  try:
+    watcherProc.kill()
+  except:
+    discard
+  watcherProc.close()
 
 when defined(hotPotato):
   macro persistentImpl(expr: typed, path: static string): untyped =
@@ -319,6 +340,7 @@ else:
   proc potatoGet*(name: string): JsonNode = discard
   proc potatoPutNode*(name: string, val: JsonNode) = discard
   proc potatoCompileIt*() = discard
+  proc potatoQuit*() = discard
 
 
   template persistent*(expr: typed): untyped = expr
