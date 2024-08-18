@@ -364,12 +364,15 @@ elif defined(hotPotato):
       handlers[command]()
     commandQueue.setLen(0)
 
-  addExitProc proc() =
+  proc onExit() {.noconv.} =
     try:
       watcherProc.kill()
     except:
       discard
     watcherProc.close()
+
+  addExitProc onExit
+  setControlChook onExit
 
 when defined(hotPotato):
   macro persistentImpl(expr: typed, path: static string): untyped =
