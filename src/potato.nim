@@ -1,8 +1,41 @@
+## This is a hot code reloading(HCR) library
+## Importing of this model with `hotPotato` defined will enable the HCR.
+## Potato blocks the main process then compiles the module again as a shared object.
+## Inside the code you can use `when appType == "lib"` to detect when running inside this HCR environement.
+## When running the code all global scoped variables are assigned as normal, unless they're annotated `{.persistent.}`.
+## The macro stores the variable to a global cache to be recovered later.
+## There are two signatures which the Potato searches for for (de)serialisation
+## `deserialise`:  `proc deserialise*(dest: var T, state: var DeserialiseState, current: JsonNode)`
+## This this procedure writes to `dest`, the node it is operating on is `current`.
+## `serialise`: `proc serialise*(src: T, root: JsonNode): JsonNode`
+## Using this procedure one must return the value they want written to the present tree.
+## In the base implementation references write to the `root` with their address as a field.
+## Any other types that need this can do the same to allow migration between old and new libraries.
+## The global scope is ran on load and must not block.
+## After the global scope is ran and intialised the program then invokes the `potatoMain` procedure.
+## Its signature is `proc potatoMain() {.exportc, dynlib.}`
+## As this is called as fast as it's exited one does not need a `while` loop inside the body of this procedure.
+## It can be blocking, but making it never exit results in recompiled libraries not loading.
+
+## Potato listens for TCP input on the port `$PORTATO` for the filewatcher.
+## Refer to `potato/commands` to see the available commands.
+## `potato/watcher` is the Linux watcher based on inotify
+## `potatowatcher` is spawned by default, but the variable `POTATOWATCHER` can be used to change it.
+## As mentioned previously this watcher should send commands to Potato by sending TCP messages to the port `PORTATO`
+
+## When this program is spawned its arguments are:
+## [0]- shared object file path.
+## [1]- nim check command, a command which outputs the list of dependencies the project has.
+
 import std/[json]
 import system/ansi_c
 
 when not defined(useMalloc):
-  {.error: "Please compile with -d:useMalloc either in config or on the CLI".}
+  {.error: "Please compile with -d:useMalloc".}
+
+template log*(args: varargs[untyped, `$`]) =
+  when defined(potatoDebug):
+    log args
 
 when appType != "lib" and defined(hotPotato):
   import std/[
@@ -80,6 +113,7 @@ when appType == "lib":
 
 
   template potatoGetOr*[T](name: string, data: var T, orVal: T) =
+    ## assigns `data` to a value from the cache or the `orVal` if incapable of fetching or deserialising
     mixin deserialise
     let node = potatoGet(name)
     if node != nil:
@@ -87,10 +121,11 @@ when appType == "lib":
       try:
         data.deserialise(state, node["entry"])
       except CatchableError as e:
-        echo "Failed to deserialise: ", name, " ", e.msg
+        discard e
+        log "Potato: Failed to deserialise ", name, ": ", e.msg
         data = orVal
     else:
-      echo name, " is not in the buffer cache."
+      log "Potato:", name, " is not in the buffer cache."
       data = orVal
       potatoPut(name, data) # Always write the data to the cache
 
@@ -146,9 +181,10 @@ when appType == "lib":
       for i, x in s.mpairs:
         x.deserialise(state, current[ord i])
     except Exception as e:
-      echo e.msg
+      log "Potato: ", e.msg
 
   proc potatoPut*[T](name: string, val: T) =
+    ## adds a value to the cache, converting it into a `JObject`
     let root = newJObject()
     root.add("entry", val.serialise(root))
     potatoPutNode(name, root)
@@ -174,7 +210,7 @@ when appType == "lib":
   proc serialise*[T: ref](val: T, root: JsonNode): JsonNode =
     when compiles(val of RootObj):
       {.warning: """
-Presently HCR does not serialise inheritance objects using the field method, it just keeps a pointer.
+Presently potato does not serialise inheritance objects using the field method, it just keeps a pointer.
 Reorganizing these objects is UB and will cause problems. Type causing this message:
 """ & $typeof(val).}
       newJInt(cast[int](val))
@@ -258,10 +294,14 @@ elif defined(hotPotato):
       try:
         compileProcess.terminate()
       except OsError as e:
-        echo e.msg
+        log e.msg
       compileProcess.close()
-
-    compileProcess = startProcess("nim" & command, options = {poStdErrToStdOut, poEchoCmd, poEvalCommand, poParentStreams})
+    const flags =
+      when defined(potatoDebug):
+        {poStdErrToStdOut, poEchoCmd, poEvalCommand, poParentStreams}
+      else:
+        {poStdErrToStdOut, poEvalCommand, poParentStreams}
+    compileProcess = startProcess("nim" & command, options = flags)
 
   const
     command = querySetting(commandLine)
@@ -283,13 +323,13 @@ elif defined(hotPotato):
     if lib != nil:
       cast[proc(){.nimcall, raises: [Exception].}](lib.symAddr("potatoExit"))()
       oldLibs.add lib # Keep the address alive so pointer procs persist
-      echo "Saved Lib state"
+      log "Potato: Saved Lib state"
 
     try:
       let tmp = genTempPath("potato","")
       copyFile(string dynLibPath, tmp)
       lib = loadLib(tmp, false)
-      echo "Loaded new Lib"
+      log "Potato: Loaded new Lib"
       potatoMain = cast[typeof(potatoMain)](lib.symAddr"potatoMain")
     except:
       discard
@@ -311,11 +351,11 @@ elif defined(hotPotato):
     try:
       discard await(sock.recvinto(data.addr, 1))
     except CatchableError as e:
-      echo "Failed to read data: ", e.msg
+      log "Potato: Failed to read data: ", e.msg
     if data.ord in Command.low.ord .. Command.high.ord:
       commandQueue.add Command(data)
     else:
-      echo "Command out of range: ", data.ord
+      log "Potato: Command out of range: ", data.ord
 
   var commandSocket: AsyncSocket
 
@@ -366,7 +406,7 @@ elif defined(hotPotato):
 
   proc onExit() {.noconv.} =
     try:
-      watcherProc.kill()
+      watcherProc.terminate()
     except:
       discard
     watcherProc.close()
@@ -388,7 +428,7 @@ when defined(hotPotato):
       result = newStmtList(expr)
       let
         name = result[0][0][0]
-        thePath = newLit(path & name.repr)
+        thePath = newLit(path & ": " & name.repr)
       result[0][0][^1] = newCall("default", newCall("typeof", defaultVal))
       result.add:
         genast(name, thePath, defaultVal):
@@ -402,11 +442,22 @@ when defined(hotPotato):
     ## Annotates a variable as persistent
     persistentImpl(expr, instantiationInfo(fullpaths = true).fileName)
 else:
-  proc potatoGet*(name: string): JsonNode = discard
-  proc potatoPutNode*(name: string, val: JsonNode) = discard
-  proc potatoCompileIt*() = discard
-  proc potatoQuit*() = discard
+  proc potatoGet*(name: string): JsonNode =
+    ## Retrieves a node from the global cache
 
+  proc potatoPutNode*(name: string, val: JsonNode) =
+    ## Adds a node to the global cache
 
-  template persistent*(expr: typed): untyped = expr
+  proc potatoCompileIt*() =
+    ## Recompiles the project. This likely will trigger a reload if there is a file watcher
+
+  proc potatoQuit*() =
+    ## Exits the main loop gracefully
+
+  proc potatoError*() =
+    ## Reloads the library. Meant for recovery from things like nil reference errors.
+
+  template persistent*(expr: typed): untyped =
+    ## Annotates a global variable so that it stores its value across reloads
+    expr
 
