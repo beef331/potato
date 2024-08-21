@@ -35,7 +35,7 @@ when not defined(useMalloc):
 
 template log*(args: varargs[untyped, `$`]) =
   when defined(potatoDebug):
-    log args
+    echo args
 
 when appType != "lib" and defined(hotPotato):
   import std/[
@@ -45,6 +45,7 @@ when appType != "lib" and defined(hotPotato):
     tempfiles, envvars, tables, exitProcs
   ]
   import potato/commands
+  import pkg/checksums/sha1
 
 
 elif appType == "lib":
@@ -127,16 +128,14 @@ when appType == "lib":
     else:
       log "Potato:", name, " is not in the buffer cache."
       data = orVal
-      potatoPut(name, data) # Always write the data to the cache
 
   proc deserialise*[T: SomeInteger | enum](i: var T, state: var DeserialiseState, current: JsonNode) =
-    var iVal = current.getInt()
-    copyMem(i.addr, iVal.addr, sizeof(T))
+    i = cast[T](current.getInt())
 
   proc deserialise*(b: var bool, state: var DeserialiseState, current: JsonNode) =
     b = current.getBool()
 
-  proc deserialise*[T: pointer | ptr | proc](p: var T, state: var DeserialiseState, current: JsonNode) =
+  proc deserialise*[T: pointer | ptr](p: var T, state: var DeserialiseState, current: JsonNode) =
     let val = current.getInt()
     copyMem(p.addr, val.addr, sizeof(pointer))
 
@@ -183,33 +182,33 @@ when appType == "lib":
     except Exception as e:
       log "Potato: ", e.msg
 
-  proc potatoPut*[T](name: string, val: T) =
+  proc potatoPut*[T](name: string, val: var T) =
     ## adds a value to the cache, converting it into a `JObject`
     let root = newJObject()
     root.add("entry", val.serialise(root))
     potatoPutNode(name, root)
 
-  proc serialise*[T: SomeInteger or pointer or ptr or enum | proc](val: T, root: JsonNode): JsonNode =
+  proc serialise*[T: SomeInteger or pointer or ptr or enum](val: var T, root: JsonNode): JsonNode =
     var theAddr = 0
-    copyMem(theAddr.addr, val.addr, min(sizeof(val), sizeof(int)))
+    copyMem(theAddr.addr, val.addr, sizeof(val))
     newJInt(theAddr)
 
-  proc serialise*(val: bool, root: JsonNode): JsonNode =
+  proc serialise*(val: var bool, root: JsonNode): JsonNode =
     newJBool(val)
 
-  proc serialise*[T: distinct](val: T, root: JsonNode): JsonNode =
+  proc serialise*[T: distinct](val: var T, root: JsonNode): JsonNode =
     serialise(val.distinctbase, root)
 
-  proc serialise*[T: SomeFloat](val: T, root: JsonNode): JsonNode =
+  proc serialise*[T: SomeFloat](val: var T, root: JsonNode): JsonNode =
     newJFloat(float(val))
 
-  proc serialise*(val: string, root: JsonNode): JsonNode =
+  proc serialise*(val: var string, root: JsonNode): JsonNode =
     newJString(val)
 
 
-  proc serialise*[T: ref](val: T, root: JsonNode): JsonNode =
+  proc serialise*[T: ref](val: var T, root: JsonNode): JsonNode =
     when compiles(val of RootObj):
-      {.warning: """
+      {.error: """
 Presently potato does not serialise inheritance objects using the field method, it just keeps a pointer.
 Reorganizing these objects is UB and will cause problems. Type causing this message:
 """ & $typeof(val).}
@@ -226,17 +225,18 @@ Reorganizing these objects is UB and will cause problems. Type causing this mess
       else:
         newJInt(0)
 
-  proc serialise*[T: object or tuple](val: T, root: JsonNode): JsonNode =
+  proc serialise*[T: object or tuple](val: var T, root: JsonNode): JsonNode =
     result = newJObject()
     for fieldName, field in val.fieldPairs:
-      result.add(fieldName, field.serialise(root))
+      {.cast(uncheckedAssign).}:
+        result.add(fieldName, field.serialise(root))
 
-  proc serialise*[T](val: openarray[T], root: JsonNode): JsonNode =
+  proc serialise*[T](val: var openarray[T], root: JsonNode): JsonNode =
     result = newJArray()
-    for x in val.items:
+    for x in val.mitems:
       result.add x.serialise(root)
 
-  proc serialise*[T](val: set[T], root: JsonNode): JsonNode =
+  proc serialise*[T](val: var set[T], root: JsonNode): JsonNode =
     let buffer = newString(sizeof(val))
     copyMem(buffer.cstring, val.addr, sizeof(val))
     newJString(buffer)
@@ -244,6 +244,9 @@ Reorganizing these objects is UB and will cause problems. Type causing this mess
   proc potatoExit() {.exportc, dynlib.} =
     for ser in serialisers:
       ser()
+    reset serialisers
+    GcFullCollect()
+
 elif defined(hotPotato):
   var
     compileProcess : Process
@@ -251,6 +254,7 @@ elif defined(hotPotato):
     potatoMain: proc() {.nimcall.}
     buffers: Table[string, JsonNode]
     running = true
+    lastChecksum: SecureHash
 
   {.passc: "-rdynamic", passL: "-rdynamic".}
   {.push exportc, dynlib.}
@@ -292,7 +296,7 @@ elif defined(hotPotato):
   proc compileIt(command: string) =
     if compileProcess != nil:
       try:
-        compileProcess.terminate()
+        compileProcess.kill()
       except OsError as e:
         log e.msg
       compileProcess.close()
@@ -317,22 +321,25 @@ elif defined(hotPotato):
   proc potatoQuit*() {.exportc, dynlib.} =
     running = false
 
-  var oldLibs: seq[LibHandle]
-
   proc reloadLib() =
-    if lib != nil:
-      cast[proc(){.nimcall, raises: [Exception].}](lib.symAddr("potatoExit"))()
-      oldLibs.add lib # Keep the address alive so pointer procs persist
-      log "Potato: Saved Lib state"
+    let checksum = secureHashFile(string dynLibPath)
+    if checksum != lastChecksum:
+      if lib != nil:
+        reset buffers
+        cast[proc(){.nimcall, raises: [Exception].}](lib.symAddr("potatoExit"))()
+        log "Potato: Saved library state"
+        lib.unloadLib()
+        log "Potato: Unload last library"
 
-    try:
-      let tmp = genTempPath("potato","")
-      copyFile(string dynLibPath, tmp)
-      lib = loadLib(tmp, false)
-      log "Potato: Loaded new Lib"
-      potatoMain = cast[typeof(potatoMain)](lib.symAddr"potatoMain")
-    except:
-      discard
+      try:
+        let tmp = genTempPath("potato","")
+        copyFile(string dynLibPath, tmp)
+        lib = loadLib(tmp, false)
+        log "Potato: Loaded new library"
+        potatoMain = cast[typeof(potatoMain)](lib.symAddr"potatoMain")
+      except:
+        discard
+      lastChecksum = checksum
 
   let
     port = Port(
@@ -354,6 +361,7 @@ elif defined(hotPotato):
       log "Potato: Failed to read data: ", e.msg
     if data.ord in Command.low.ord .. Command.high.ord:
       commandQueue.add Command(data)
+      log "Potato: got new command ", commandQueue[^1]
     else:
       log "Potato: Command out of range: ", data.ord
 
@@ -394,6 +402,8 @@ elif defined(hotPotato):
       if sigsetjmp(jmp, int32.high.cint) == 0:
         potatoMain()
       else:
+        if not running:
+          break
         reloadLib()
     try:
       poll(0)
@@ -435,6 +445,7 @@ when defined(hotPotato):
           potatoGetOr(thePath, name, defaultVal)
           serialisers.add proc() {.raises: [Exception], nimcall.} =
             potatoPut(thePath, name)
+            name = default(typeof(name))
     else:
       result = expr
 

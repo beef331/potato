@@ -38,8 +38,8 @@ proc reloadWatcher() {.gcsafe.} =
     watcherFile = newAsyncFile(AsyncFd iNotifyFd)
 
   {.cast(gcSafe).}:
-    assert iNotifyFd.inotify_add_watch(cstring dylibPath.Path.parentDir().string, InCloseWrite) >= 0
-
+    assert iNotifyFd.inotify_add_watch(cstring dylibPath.Path.parentDir().string, {Modify, CloseWrite}) >= 0
+  var didModify = false
   while true:
     try:
       let len = waitfor watcherfile.readBuffer(buffer.cstring, buffer.len)
@@ -48,9 +48,14 @@ proc reloadWatcher() {.gcsafe.} =
         var event = cast[ptr InotifyEvent](buffer[pos].addr)
         {.cast(gcSafe).}:
           if event.getName() == dylibPath.Path.extractFileName().string:
-            tryToSend(Reload)
-            reloaded.store true
-            pos = len
+            if Modify in event.mask:
+              didModify = true
+            if CloseWrite in event.mask and didModify:
+              tryToSend(Reload)
+              reloaded.store true
+              pos = len
+              didModify = false
+
         pos += sizeof(InotifyEvent) + int event.len
 
     except Exception as e:
@@ -62,6 +67,7 @@ proc getDepends(command: string): HashSet[string] =
   let depProcess = startProcess("nim" & command, options = {poEvalCommand, poEchoCmd, poStdErrToStdOut})
   defer:
     try:
+      depProcess.terminate()
       depProcess.close()
     except CatchableError as e:
       echo e.msg
@@ -77,8 +83,6 @@ proc compileWatcher() =
     buffer = newString(sizeof(InotifyEvent) + pathMax + 1)
     iNotifyFd = inotify_init()
     watcherFile = newAsyncFile(AsyncFd iNotifyFd)
-    lastCount = 0
-    watchFut: Future[string]
     fds: Table[string, cint]
     currentDepends: HashSet[string]
 
