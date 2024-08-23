@@ -5,6 +5,12 @@ It's a hot code reloading proof of concept. Hot potato get it? No. Good.
 
 First `nimble install https://github.com/beef331/potato` or add a `requires "https://github.com/beef331/potato >= 0.1.2"` to the `.nimble` file.
 
+Add the following to `config.nims`
+```nim
+when appType == "lib":
+  --nimMainPrefix="libpotato"
+```
+
 Following that `import potato` in the main project file.
 Now one can annotate any global variables with `{.persistent.}` these variables will as the name implies persist across reloads.
 Any global code should be non blocking as the potato library calls a specific entry procedure.

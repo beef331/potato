@@ -348,11 +348,15 @@ elif defined(hotPotato):
         if clients[i].isClosed:
           clients.del(i)
 
-  commandSocket = newAsyncSocket()
-  commandSocket.setSockOpt(OptReuseAddr, true)
-  commandSocket.bindAddr(port)
-  putEnv("PORTATO", $commandSocket.getLocalAddr()[1].int)
-  commandSocket.listen()
+  try:
+    commandSocket = newAsyncSocket()
+    commandSocket.setSockOpt(OptReuseAddr, true)
+    commandSocket.bindAddr(port)
+    commandSocket.listen()
+    putEnv("PORTATO", $commandSocket.getLocalAddr()[1].int)
+  except:
+    echo "Failed to setup listening port on: ", port.int
+    quit 1
 
 
   const handlers = [
