@@ -1,32 +1,3 @@
-## This is a hot code reloading(HCR) library
-## Importing of this model with `hotPotato` defined will enable the HCR.
-## Potato blocks the main process then compiles the module again as a shared object.
-## Inside the code you can use `when appType == "lib"` to detect when running inside this HCR environement.
-## When running the code all global scoped variables are assigned as normal, unless they're annotated `{.persistent.}`.
-## The macro stores the variable to a global cache to be recovered later.
-## There are two signatures which the Potato searches for for (de)serialisation
-## `deserialise`:  `proc deserialise*(dest: var T, state: var DeserialiseState, current: JsonNode)`
-## This this procedure writes to `dest`, the node it is operating on is `current`.
-## `serialise`: `proc serialise*(src: T, root: JsonNode): JsonNode`
-## Using this procedure one must return the value they want written to the present tree.
-## In the base implementation references write to the `root` with their address as a field.
-## Any other types that need this can do the same to allow migration between old and new libraries.
-## The global scope is ran on load and must not block.
-## After the global scope is ran and intialised the program then invokes the `potatoMain` procedure.
-## Its signature is `proc potatoMain() {.exportc, dynlib.}`
-## As this is called as fast as it's exited one does not need a `while` loop inside the body of this procedure.
-## It can be blocking, but making it never exit results in recompiled libraries not loading.
-
-## Potato listens for TCP input on the port `$PORTATO` for the filewatcher.
-## Refer to `potato/commands` to see the available commands.
-## `potato/watcher` is the Linux watcher based on inotify
-## `potatowatcher` is spawned by default, but the variable `POTATOWATCHER` can be used to change it.
-## As mentioned previously this watcher should send commands to Potato by sending TCP messages to the port `PORTATO`
-
-## When this program is spawned its arguments are:
-## [0]- shared object file path.
-## [1]- nim check command, a command which outputs the list of dependencies the project has.
-
 import std/[json]
 import system/ansi_c
 
