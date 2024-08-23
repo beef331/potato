@@ -106,7 +106,7 @@ when appType == "lib":
   proc deserialise*(b: var bool, state: var DeserialiseState, current: JsonNode) =
     b = current.getBool()
 
-  proc deserialise*[T: pointer | ptr](p: var T, state: var DeserialiseState, current: JsonNode) =
+  proc deserialise*[T: pointer | ptr or proc](p: var T, state: var DeserialiseState, current: JsonNode) =
     let val = current.getInt()
     copyMem(p.addr, val.addr, sizeof(pointer))
 
@@ -159,7 +159,7 @@ when appType == "lib":
     root.add("entry", val.serialise(root))
     potatoPutNode(name, root)
 
-  proc serialise*[T: SomeInteger or pointer or ptr or enum](val: var T, root: JsonNode): JsonNode =
+  proc serialise*[T: SomeInteger or pointer or ptr or enum or proc](val: var T, root: JsonNode): JsonNode =
     var theAddr = 0
     copyMem(theAddr.addr, val.addr, sizeof(val))
     newJInt(theAddr)
@@ -299,7 +299,7 @@ elif defined(hotPotato):
         reset buffers
         cast[proc(){.nimcall, raises: [Exception].}](lib.symAddr("potatoExit"))()
         log "Potato: Saved library state"
-        lib.unloadLib()
+        #lib.unloadLib()
         log "Potato: Unload last library"
 
       try:

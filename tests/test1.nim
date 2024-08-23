@@ -78,7 +78,7 @@ type
       j: string
 
 
-proc myProc(){.nimcall.} = echo "world"
+proc myProc(){.nimcall.} = echo "huh"
 var app {.persistent.} = App(window: nil, renderer: nil)
 
 app.someProc = myProc
@@ -133,8 +133,7 @@ proc potatoMain() {.exportc, dynlib.}=
         if evt.key.keysym.sym == K_F11:
           potatoCompileIt()
         if evt.key.keysym.sym == K_F12:
-          var a: ref int
-          echo a[]
+          app.someProc()
       of WindowEvent:
         if evt.window.event.WindowEventID == WindowEventClose:
           quit(0)

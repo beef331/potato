@@ -41,11 +41,13 @@ There are two signatures which the Potato searches for for (de)serialisation:
 
 
 ## Limitations
-As there is no way to recover the type from inheritance.
-Inheritance is disabled by default.
-One can provide a hook for their specific type if they need it.
+Since there is no way to recover the type from inheritance migration of inheritance object is disabled by default.
 
-Pointer procedures are disabled by default as there is no way to migrate anonymous pointer procs.
+There is not a clean way to migrate them consistently pointer procedures are not migrated.
+Which means you must update where pointer procedures point to on reload.
+In the future one could read the symbol table of a binary to migrate pointers though this causes an issue with anonymous procedures.
 It is suggested to use `enum`s into a global constant array or similar to make dispatch static as it not rely on runtime information.
 
-As of now [`potatowatcher`](src/potato/watcher.nim) is a Linux only file watcher. In the future it makes more sense to use `fswatch` for crossplatform file watching.
+
+
+As of now [`potatowatcher`](src/potato/watcher.nim) is a Linux only file watcher. In the future it makes more sense to use `fswatch` for cross-platform file watching.
