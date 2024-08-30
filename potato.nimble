@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.1.2"
+version       = "0.1.3"
 author        = "Jason Beetham"
 description   = "Hot code reloading done as a macro"
 license       = "MIT"
@@ -13,4 +13,5 @@ namedbin = {"potato/watcher": "potatowatcher"}.toTable()
 # Dependencies
 
 requires "nim >= 2.0.8"
+requires "checksums >= 0.2.1"
 taskRequires "test", "sdl2_nim >= 2.0.14.1"
