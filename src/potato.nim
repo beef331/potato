@@ -101,13 +101,13 @@ elif defined(hotPotato):
     let
       firstSpace = str.find(" ")
       secondSpace = str.find(" ", firstSpace + 1)
-      toInsert = " --app:lib --verbosity:0 "
+      toInsert = " --app:lib --verbosity:0 --nimcache='$nimcache/potato_$projectname' "
     result = str
     result = result.replace(" -r ", " ")
     result.insert toInsert, secondSpace
 
   proc insertCheckFlags(str: string): string =
-    const toInsert = " check --verbosity:0 --processing:filenames --warnings:off --hint:all=off --hint:Processing:on "
+    const toInsert = " check --verbosity:0 --processing:filenames --warnings:off --hint:all=off --hint:Processing:on --nimcache='$nimcache/potato_check_$projectname' "
     result = str.multireplace(
       {
         " --hints:off": " ",
