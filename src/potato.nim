@@ -1,4 +1,3 @@
-import std/[json]
 import system/ansi_c
 import potato/[starch, sprouts]
 export starch, sprouts
@@ -6,7 +5,7 @@ export starch, sprouts
 when not defined(useMalloc):
   {.error: "Please compile with -d:useMalloc".}
 
-template log(args: varargs[untyped, `$`]) =
+template log(args: varargs[untyped, `$`]) {.used.} =
   when defined(potatoDebug):
     echo args
 
@@ -15,14 +14,14 @@ when appType != "lib" and defined(hotPotato):
   import std/[
     dynlib, compilesettings,
     paths, strutils,
-    osproc, asyncdispatch, asyncnet, os,
+    osproc, os, net, selectors, json,
     tempfiles, envvars, tables, exitProcs
   ]
   import potato/commands
   import pkg/checksums/sha1
 
 when appType == "lib":
-  import std/[typetraits, macros, genasts, tables]
+  import std/typetraits
 
 
   globalRaiseHook = proc(e: ref Exception): bool =
@@ -38,27 +37,27 @@ when appType == "lib":
   {.push stackTrace:off.}
   proc signalHandler(sign: cint) {.noconv.} =
     if sign == SIGINT:
-      echo("SIGINT: Interrupted by Ctrl-C.")
+      echo "SIGINT: Interrupted by Ctrl-C."
       potatoQuit()
       potatoError()
     elif sign == SIGSEGV:
       writeStackTrace()
-      echo("SIGSEGV: Illegal storage access. (Attempt to read from nil?)")
+      echo "SIGSEGV: Illegal storage access. (Attempt to read from nil?)"
       potatoError()
     elif sign == SIGABRT:
       writeStackTrace()
-      echo("SIGABRT: Abnormal termination.")
+      echo "SIGABRT: Abnormal termination."
       potatoError()
     elif sign == SIGFPE:
       writeStackTrace()
-      echo("SIGFPE: Arithmetic error.")
+      echo "SIGFPE: Arithmetic error."
       potatoError()
     elif sign == SIGILL:
       writeStackTrace()
-      echo("SIGILL: Illegal operation.")
+      echo "SIGILL: Illegal operation."
       potatoError()
     elif (when declared(SIGBUS): sign == SIGBUS else: false):
-      echo("SIGBUS: Illegal storage access. (Attempt to read from nil?)")
+      echo "SIGBUS: Illegal storage access. (Attempt to read from nil?)"
       potatoError()
   {.pop.}
 
@@ -77,6 +76,7 @@ elif defined(hotPotato):
     potatoMain: proc() {.nimcall.}
     buffers: Table[string, JsonNode]
     running = true
+    crashed = false
     lastChecksum: SecureHash
 
   {.passc: "-rdynamic", passL: "-rdynamic".}
@@ -135,7 +135,7 @@ elif defined(hotPotato):
     dynLibPath = querySetting(outDir).Path / Path(DynLibFormat % querySetting(outFile))
 
   var jmp: C_JmpBuf
-  proc potatoError() {.exportc, dynlib.} =
+  proc potatoError*() {.exportc, dynlib.} =
     siglongjmp(jmp, 1)
 
   proc potatoCompileIt*() {.exportc, dynlib.} =
@@ -143,11 +143,12 @@ elif defined(hotPotato):
 
   proc potatoQuit*() {.exportc, dynlib.} =
     running = false
+    potatoError()
 
   proc reloadLib() =
     let checksum = secureHashFile(string dynLibPath)
     if checksum != lastChecksum:
-      if lib != nil:
+      if lib != nil and not crashed:
         reset buffers
         cast[proc(){.nimcall, raises: [Exception].}](lib.symAddr("potatoExit"))()
         log "Potato: Saved library state"
@@ -160,6 +161,7 @@ elif defined(hotPotato):
         lib = loadLib(tmp, false)
         log "Potato: Loaded new library"
         potatoMain = cast[typeof(potatoMain)](lib.symAddr"potatoMain")
+        crashed = false
       except:
         discard
       lastChecksum = checksum
@@ -176,35 +178,43 @@ elif defined(hotPotato):
 
   var commandQueue: seq[Command]
 
-  proc readCommand(sock: AsyncSocket) {.async.} =
+  proc readCommand(sock: Socket) =
     var data: uint8
+    var read = 0
     try:
-      discard await(sock.recvinto(data.addr, 1))
+      read = sock.recv(data.addr, 1)
     except CatchableError as e:
       log "Potato: Failed to read data: ", e.msg
-    if data.ord in Command.low.ord .. Command.high.ord:
-      commandQueue.add Command(data)
-      log "Potato: got new command ", commandQueue[^1]
-    else:
-      log "Potato: Command out of range: ", data.ord
+    if read != 0:
+      if data.ord in Command.low.ord .. Command.high.ord:
+        commandQueue.add Command(data)
+        log "Potato: got new command ", commandQueue[^1]
+      else:
+        log "Potato: Command out of range: ", data.ord
 
-  var commandSocket: AsyncSocket
+  var
+    commandSocket: Socket
+    clients: seq[Socket]
+    selector = newSelector[uint8]()
 
-  proc tcpLoop() {.async.} =
-    var clients: seq[AsyncSocket]
-    while true:
-      let client = await commandSocket.accept()
-      clients.add client
-      asyncCheck readCommand(client)
-      for i in countDown(clients.high, 0):
-        if clients[i].isClosed:
-          clients.del(i)
+  proc tcpLoop() =
+    for evt in selector.select(0): # Any events ready
+      if evt.fd == commandSocket.getFd().int:
+        var sock: Socket
+        commandSocket.accept(sock)
+        selector.registerHandle(sock.getFd(), {Read}, 0)
+        clients.add sock
+      else:
+        for x in clients:
+          if x.getFd().int == evt.fd:
+            x.readCommand()
 
   try:
-    commandSocket = newAsyncSocket()
+    commandSocket = newSocket()
     commandSocket.setSockOpt(OptReuseAddr, true)
     commandSocket.bindAddr(port)
     commandSocket.listen()
+    selector.registerHandle(commandSocket.getFd(), {Read}, 0)
     putEnv("PORTATO", $commandSocket.getLocalAddr()[1].int)
   except:
     echo "Failed to setup listening port on: ", port.int
@@ -222,20 +232,16 @@ elif defined(hotPotato):
     args = [string dynLibPath, command.insertCheckFlags()],
     options = {poStdErrToStdOut, poParentStreams, poUsePath}
   )
-  var theTcpLoop = tcpLoop()
-
   while running:
-    if potatoMain != nil:
+    if potatoMain != nil and not crashed:
       if sigsetjmp(jmp, int32.high.cint) == 0:
         potatoMain()
       else:
         if not running:
           break
-        reloadLib()
-    try:
-      poll(0)
-    except CatchableError:
-      theTcpLoop = tcpLoop()
+        crashed = true
+
+    tcpLoop()
 
     for command in commandQueue:
       handlers[command]()
@@ -243,15 +249,19 @@ elif defined(hotPotato):
 
   proc onExit() {.noconv.} =
     try:
-      watcherProc.terminate()
+      watcherProc.kill()
     except:
       discard
     watcherProc.close()
+    selector.close()
+    commandSocket.close()
+
 
   addExitProc onExit
   setControlChook onExit
 
 when not defined(hotPotato):
+  import std/json
   proc potatoGet*(name: string): JsonNode =
     ## Retrieves a node from the global cache
 

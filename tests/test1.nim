@@ -16,7 +16,6 @@ type
   App = object
     window*: sdl.Window # Window pointer
     renderer*: sdl.Renderer # Rendering state pointer
-    someProc: proc(){.nimcall.}
 
 
 # Initialization sequence
@@ -66,50 +65,15 @@ proc exit(app: var App) =
 # MAIN #
 ########
 
-type
-  Cycle = ref object
-    child: Cycle
-    value: int
-  ObjectVariant = object
-    case kind: bool
-    of true:
-      i: int
-    of false:
-      j: string
 
-
-proc myProc(){.nimcall.} = echo "huh"
 var app {.persistent.} = App(window: nil, renderer: nil)
 
-app.someProc = myProc
-
 var rect {.persistent.} = Rect(x: 0, y: 0, w: 100, h:100)
-var a {.persistent.} = block:
-  echo "Alloc cycle"
-  let cyc = Cycle(value: 10)
-  cyc.child = Cycle(value: 300, child: cyc)
-  cyc
 
-proc printTree(c: Cycle) =
-  var
-    buffer = ""
-    visited: seq[Cycle]
-    current = c
-
-  while current != nil and current notin visited:
-    buffer.add $current.value
-    buffer.add " -> "
-    visited.add current
-    current = current.child
-
-  echo buffer
-
-a.printTree()
-
-var someVar {.persistent.} = ObjectVariant(kind: false, j: "hmm")
 
 proc potatoMain() {.exportc, dynlib.}=
   #app.someProc()
+
   if app.window != nil or init(app):
     # Clear screen with draw color
     discard app.renderer.setRenderDrawColor(0, 0, 0, 255)
@@ -132,15 +96,13 @@ proc potatoMain() {.exportc, dynlib.}=
       of Keydown:
         if evt.key.keysym.sym == K_F11:
           potatoCompileIt()
-        if evt.key.keysym.sym == K_F12:
-          app.someProc()
+
       of WindowEvent:
         if evt.window.event.WindowEventID == WindowEventClose:
-          quit(0)
-
+          app.exit()
+          potatoQuit()
       else:
         discard
-
     # Update renderer
     app.renderer.renderPresent()
 
