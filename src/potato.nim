@@ -24,20 +24,22 @@ when appType == "lib":
   import std/typetraits
 
 
-  globalRaiseHook = proc(e: ref Exception): bool =
-    for i, x in e.getStackTraceEntries:
-      stdout.write x.fileName, "(", x.line, ") ", x.procName
-      stdout.write "\n"
-    stdout.write"Error: "
-    stdout.writeLine e.msg
-    stdout.flushFile()
-    potatoError()
-    true
+  unhandledExceptionHook = proc(e: ref Exception) {.nimcall, gcsafe, raises: [], tags: [].}=
+    try:
+      {.cast(tags: []).}:
+        for i, x in e.getStackTraceEntries:
+          stdout.write x.fileName, "(", x.line, ") ", x.procName
+          stdout.write "\n"
+        stdout.write"Error: "
+        stdout.writeLine e.msg
+        stdout.flushFile()
+        potatoError()
+    except:
+      discard
 
   {.push stackTrace:off.}
   proc signalHandler(sign: cint) {.noconv.} =
     if sign == SIGINT:
-      echo "SIGINT: Interrupted by Ctrl-C."
       potatoQuit()
       potatoError()
     elif sign == SIGSEGV:
@@ -61,13 +63,15 @@ when appType == "lib":
       potatoError()
   {.pop.}
 
-  c_signal(SIGINT, signalHandler)
+  #c_signal(SIGINT, signalHandler)
   c_signal(SIGSEGV, signalHandler)
   c_signal(SIGABRT, signalHandler)
   c_signal(SIGFPE, signalHandler)
   c_signal(SIGILL, signalHandler)
   when declared(SIGBUS):
     c_signal(SIGBUS, signalHandler)
+
+
 
 elif defined(hotPotato):
   var
@@ -135,7 +139,16 @@ elif defined(hotPotato):
     dynLibPath = querySetting(outDir).Path / Path(DynLibFormat % querySetting(outFile))
 
   var jmp: C_JmpBuf
+
+  proc potatoSave() =
+    reset buffers
+    cast[proc(){.nimcall, raises: [Exception].}](lib.symAddr("potatoExit"))()
+    log "Potato: Saved library state"
+    lib.unloadLib()
+    log "Potato: Unload last library"
+
   proc potatoError*() {.exportc, dynlib.} =
+    potatoSave()
     siglongjmp(jmp, 1)
 
   proc potatoCompileIt*() {.exportc, dynlib.} =
@@ -143,17 +156,13 @@ elif defined(hotPotato):
 
   proc potatoQuit*() {.exportc, dynlib.} =
     running = false
-    potatoError()
+    siglongjmp(jmp, 1)
 
   proc reloadLib() =
     let checksum = secureHashFile(string dynLibPath)
     if checksum != lastChecksum:
       if lib != nil and not crashed:
-        reset buffers
-        cast[proc(){.nimcall, raises: [Exception].}](lib.symAddr("potatoExit"))()
-        log "Potato: Saved library state"
-        #lib.unloadLib()
-        log "Potato: Unload last library"
+        potatoSave()
 
       try:
         let tmp = genTempPath("potato","")
@@ -224,7 +233,7 @@ elif defined(hotPotato):
   const handlers = [
     Compile: proc() = potatoCompileIt(),
     Reload: proc() = reloadLib(),
-    Quit: proc() = running = false
+    Quit: proc() = potatoQuit()
   ]
 
   let watcherProc {.used.} = startProcess(
@@ -232,6 +241,25 @@ elif defined(hotPotato):
     args = [string dynLibPath, command.insertCheckFlags()],
     options = {poStdErrToStdOut, poParentStreams, poUsePath}
   )
+
+
+  template tryIt(expr: untyped) =
+    try:
+      expr
+    except:
+      discard
+
+  proc freeResources() {.noConv.} =
+    tryIt watcherProc.kill()
+    tryIt watcherProc.close()
+    tryIt selector.close()
+    tryIt commandSocket.close()
+
+  addExitProc freeResources
+  setControlChook proc() {.noConv.} =
+    freeResources()
+    potatoQuit()
+
   while running:
     if potatoMain != nil and not crashed:
       if sigsetjmp(jmp, int32.high.cint) == 0:
@@ -247,18 +275,7 @@ elif defined(hotPotato):
       handlers[command]()
     commandQueue.setLen(0)
 
-  proc onExit() {.noconv.} =
-    try:
-      watcherProc.kill()
-    except:
-      discard
-    watcherProc.close()
-    selector.close()
-    commandSocket.close()
 
-
-  addExitProc onExit
-  setControlChook onExit
 
 when not defined(hotPotato):
   import std/json

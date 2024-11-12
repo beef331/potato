@@ -9,6 +9,8 @@ import inotifyevents, commands
 
 const pathMax = 4096
 
+type WatcherError = object of CatchableError
+
 let
   port = Port(
     try:
@@ -29,6 +31,7 @@ proc tryToSend(cmd: Command) =
     discard theSocket.send(cmd.addr, 1)
   except CatchableError as e:
     echo "Failed to send to potato'd program: ", e.msg
+    raise newException(ValueError, "Shutting down as program lost connection")
 
 
 proc reloadWatcher() {.gcsafe.} =
