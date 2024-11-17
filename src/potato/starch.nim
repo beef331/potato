@@ -168,7 +168,6 @@ when appType == "lib":
         potatoGetOr(thePath, name, defaultVal)
         serialisers.add proc() {.raises: [Exception], nimcall.} =
           potatoPut(thePath, name)
-          name = default(typeof(name))
 
   template persistent*(expr: typed): untyped =
     ## Annotates a variable as persistent

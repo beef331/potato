@@ -73,7 +73,7 @@ proc getDepends(command: string): HashSet[string] =
       depProcess.terminate()
       depProcess.close()
     except CatchableError as e:
-      echo e.msg
+      discard
   for line in depProcess.lines:
     var hintStr: string
     if line.scanf("Hint: $+ [Processing]", hintStr):

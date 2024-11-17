@@ -141,11 +141,11 @@ elif defined(hotPotato):
   var jmp: C_JmpBuf
 
   proc potatoSave() =
-    reset buffers
     cast[proc(){.nimcall, raises: [Exception].}](lib.symAddr("potatoExit"))()
     log "Potato: Saved library state"
-    lib.unloadLib()
-    log "Potato: Unload last library"
+    {.warning: "TODO: unload the library to reduce some memory usage".}
+    #lib.unloadLib()
+    #log "Potato: Unload last library"
 
   proc potatoError*() {.exportc, dynlib.} =
     potatoSave()
