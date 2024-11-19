@@ -12,3 +12,4 @@ when appType == "lib":
   proc potatoQuit*()
   proc potatoError*()
   {.pop.}
+  proc potatoGetError(): ref Exception {.exportc, dynlib.} = getCurrentException()

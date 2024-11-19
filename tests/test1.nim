@@ -90,6 +90,11 @@ proc potatoMain() {.exportc, dynlib.}=
     if rect.y > h:
       rect.y = 0
 
+
+    var a = [0]
+    let b = -1
+    #echo a[b]
+    #discard parseInt("hello")
     var evt: Event
     while pollEvent(addr evt) != 0:
       case evt.kind

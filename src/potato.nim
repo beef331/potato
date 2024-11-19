@@ -23,7 +23,6 @@ when appType != "lib" and defined(hotPotato):
 when appType == "lib":
   import std/typetraits
 
-
   unhandledExceptionHook = proc(e: ref Exception) {.nimcall, gcsafe, raises: [], tags: [].}=
     try:
       {.cast(tags: []).}:
@@ -36,6 +35,7 @@ when appType == "lib":
         potatoError()
     except:
       discard
+
 
   {.push stackTrace:off.}
   proc signalHandler(sign: cint) {.noconv.} =
@@ -74,10 +74,15 @@ when appType == "lib":
 
 
 elif defined(hotPotato):
+  const
+    ErrorJump = 1
+    QuitJump = 2
+
   var
     compileProcess : Process
     lib: LibHandle
     potatoMain: proc() {.nimcall.}
+    potatoGetError: proc(): ref Exception {.nimcall.}
     buffers: Table[string, JsonNode]
     running = true
     crashed = false
@@ -148,15 +153,14 @@ elif defined(hotPotato):
     #log "Potato: Unload last library"
 
   proc potatoError*() {.exportc, dynlib.} =
-    potatoSave()
-    siglongjmp(jmp, 1)
+    siglongjmp(jmp, ErrorJump)
 
   proc potatoCompileIt*() {.exportc, dynlib.} =
     compileIt command.insertFlags()
 
   proc potatoQuit*() {.exportc, dynlib.} =
     running = false
-    siglongjmp(jmp, 1)
+    siglongjmp(jmp, QuitJump)
 
   proc reloadLib() =
     let checksum = secureHashFile(string dynLibPath)
@@ -170,6 +174,7 @@ elif defined(hotPotato):
         lib = loadLib(tmp, false)
         log "Potato: Loaded new library"
         potatoMain = cast[typeof(potatoMain)](lib.symAddr"potatoMain")
+        potatoGetError = cast[typeof(potatoGetError)](lib.symAddr"potatoGetError")
         crashed = false
       except:
         discard
@@ -260,14 +265,31 @@ elif defined(hotPotato):
     freeResources()
     potatoQuit()
 
+
+  proc handleExceptionIfRaised() =
+    let err = potatoGetError()
+    if err != nil:
+      for i, x in err.getStackTraceEntries:
+        stdout.write x.fileName, "(", x.line, ") ", x.procName
+        stdout.write "\n"
+      stdout.write"Error: "
+      stdout.writeLine err.msg
+      stdout.flushFile()
+      potatoError()
+
   while running:
     if potatoMain != nil and not crashed:
-      if sigsetjmp(jmp, int32.high.cint) == 0:
+      let jmp = sigsetjmp(jmp, int32.high.cint)
+      if jmp == 0:
         potatoMain()
-      else:
-        if not running:
-          break
+        handleExceptionIfRaised()
+      elif jmp == ErrorJump:
+        potatoSave()
         crashed = true
+      elif jmp == QuitJump:
+        break
+      else:
+        echo "Incorrect jump to: ", jmp
 
     tcpLoop()
 
