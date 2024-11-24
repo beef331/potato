@@ -109,23 +109,16 @@ when appType == "lib":
 
 
   proc serialise*[T: ref](val: var T, root: JsonNode): JsonNode =
-    when compiles(val of RootObj):
-      {.error: """
-  Presently potato does not serialise inheritance objects using the field method, it just keeps a pointer.
-  Reorganizing these objects is UB and will cause problems. Type causing this message:
-  """ & $typeof(val).}
-      newJInt(cast[int](val))
+    var iVal: int
+    copyMem(iVal.addr, val.addr, sizeof(pointer))
+    if val != nil:
+      let strName = $iVal
+      if not root.hasKey(strName):
+        root.add(strName, nil) # store a temp here
+        root[strName] = val[].serialise(root)
+      newJInt(iVal)
     else:
-      var iVal: int
-      copyMem(iVal.addr, val.addr, sizeof(pointer))
-      if val != nil:
-        let strName = $iVal
-        if not root.hasKey(strName):
-          root.add(strName, nil) # store a temp here
-          root[strName] = val[].serialise(root)
-        newJInt(iVal)
-      else:
-        newJInt(0)
+      newJInt(0)
 
   proc serialise*[T: object or tuple](val: var T, root: JsonNode): JsonNode =
     result = newJObject()

@@ -147,10 +147,10 @@ elif defined(hotPotato):
 
   proc potatoSave() =
     cast[proc(){.nimcall, raises: [Exception].}](lib.symAddr("potatoExit"))()
+    cast[proc(){.nimcall.}](lib.symAddr("NimDestroyGlobals"))()
     log "Potato: Saved library state"
-    {.warning: "TODO: unload the library to reduce some memory usage".}
-    #lib.unloadLib()
-    #log "Potato: Unload last library"
+    lib.unloadLib()
+    log "Potato: Unload last library"
 
   proc potatoError*() {.exportc, dynlib.} =
     siglongjmp(jmp, ErrorJump)
