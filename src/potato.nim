@@ -147,9 +147,9 @@ elif defined(hotPotato):
 
   proc potatoSave() =
     cast[proc(){.nimcall, raises: [Exception].}](lib.symAddr("potatoExit"))()
-    cast[proc(){.nimcall.}](lib.symAddr("NimDestroyGlobals"))()
+    #cast[proc(){.nimcall.}](lib.symAddr("NimDestroyGlobals"))()
     log "Potato: Saved library state"
-    lib.unloadLib()
+    #lib.unloadLib()
     log "Potato: Unload last library"
 
   proc potatoError*() {.exportc, dynlib.} =

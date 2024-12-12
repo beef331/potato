@@ -139,8 +139,8 @@ when appType == "lib":
   proc potatoExit() {.exportc, dynlib.} =
     for ser in serialisers:
       ser()
-    reset serialisers
-    GcFullCollect()
+    #reset serialisers
+    #GcFullCollect()
 
   macro persistentImpl(expr: typed, path: static string): untyped =
     var
