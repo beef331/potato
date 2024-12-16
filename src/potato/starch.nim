@@ -13,7 +13,7 @@ when appType == "lib":
     refs*: Table[int, pointer]
     root*: JsonNode
 
-  var serialisers*: seq[proc() {.nimcall, raises: [Exception].}]
+  var serialisers: seq[proc() {.nimcall, raises: [Exception].}]
 
   template potatoGetOr*[T](name: string, data: var T, orVal: T) =
     ## assigns `data` to a value from the cache or the `orVal` if incapable of fetching or deserialising
@@ -165,3 +165,12 @@ when appType == "lib":
   template persistent*(expr: typed): untyped =
     ## Annotates a variable as persistent
     persistentImpl(expr, instantiationInfo(fullpaths = true).fileName)
+
+  template persist*(expr: typed{sym}): untyped =
+    ## Persists a symbol across a reload
+    const path = instantiationInfo(fullpaths = true).fileName & ": " & astToStr(expr)
+    potatoGetOr(path, expr, expr)
+
+    serialisers.add proc() =
+      potatoPut(path, expr)
+

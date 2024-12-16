@@ -321,3 +321,6 @@ when not defined(hotPotato) or appType != "lib":
     ## Annotates a global variable so that it stores its value across reloads
     expr
 
+  template persist*(expr: typed): untyped =
+    ## Adds a hook to store a value on exit, meant for types you did not author
+
