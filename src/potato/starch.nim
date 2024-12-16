@@ -13,7 +13,7 @@ when appType == "lib":
     refs*: Table[int, pointer]
     root*: JsonNode
 
-  var serialisers: seq[proc() {.nimcall, raises: [Exception].}]
+  var serialisers*: seq[proc() {.nimcall, raises: [Exception].}]
 
   template potatoGetOr*[T](name: string, data: var T, orVal: T) =
     ## assigns `data` to a value from the cache or the `orVal` if incapable of fetching or deserialising
